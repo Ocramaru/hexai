@@ -2,15 +2,6 @@
 
 Open tasks for the VVAE. Cross off as they land. Findings go in [learned.md](learned.md), design rationale in [context.md](context.md).
 
-## After the current sweep finishes
-
-The hand-tracked running bests are now redundant — `define_metric(summary=...)` makes wandb keep them itself, under a **suffixed** key (`val/lift_agreement.max`, not the bare name). Both are logged right now only because deleting the manual ones mid-sweep would leave the running cells unrankable. Verified identical: 0.5833744804064432 either way.
-
-- [ ] Point `sweep.json` at `val/lift_agreement.max` instead of `val/lift_agreement_best`.
-- [ ] Drop `"val/scene_corr_best"` and `"val/lift_agreement_best"` from the metrics dict in `train.py`.
-- [ ] Drop `best_corr` and `best_agree` from the training loop, the checkpoint dict, and the resume path that restores them.
-- [ ] `val/skill.max` and `val/invented_density.min` now exist for free — worth considering as sweep metrics.
-
 ## Still unwritten
 
 - [ ] `tests/test_geometry.py`. Every convention it would pin — index order, pose direction, `grid_sample`'s reversed coordinates, splat weights staying non-negative at box edges — has already caused a bug. The checks only exist in scratch files.

@@ -72,8 +72,9 @@ scene_corr        how alike different scenes decode. Near 1 means the decoder is
 unknown_mae       how well the observedness channel matches the carving. Only with unknown=1.
 depth_mae_m       depth error in metres, the one number with a physical unit.
 
-The *_best variants are running bests, because the summary a sweep reads keeps the last
-logged value and these swing between epochs.
+wandb keeps the running best of the four that have one, under a suffixed key: read
+val/lift_agreement.max and val/invented_density.min, not the bare names. The summary a sweep
+reads otherwise keeps the last logged value, and these swing between epochs.
 """
 
 
@@ -199,7 +200,7 @@ def _floor_plan(ax, density, pose, config, title):
 
 
 @torch.no_grad()
-def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb'):
+def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb', note=''):
     """Truth against the render, and the lifted volume against the decoded one. The image pair alone
     cannot tell undertrained from broken -- a saturated density field also renders flat grey -- so
     the volumes go beside it, and the density fractions go up as scalars."""
@@ -221,6 +222,7 @@ def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb'):
     _floor_plan(axes[3], decoded[model.config.density_index], query[0], model.config,
                 "decoded volume, top-down")
     for ax in axes: ax.set(xticks=[], yticks=[])
+    if note: fig.suptitle(note, fontsize=9)
     fig.tight_layout()
 
     if wandb.run is not None:
@@ -232,7 +234,8 @@ def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb'):
 
 
 @torch.no_grad()
-def log_pose_sweep(model, batch, step=None, key='sweep', target=1, mode='rgb', yaws=(-24, -12, 12, 24)):
+def log_pose_sweep(model, batch, step=None, key='sweep', target=1, mode='rgb', note='',
+                   yaws=(-24, -12, 12, 24)):
     """Truth over render, angle by angle. The latent is encoded once and rendered from each yaw, so
     a row that stays the same across the sweep is a latent that has stopped depending on viewpoint,
     which no single-pose panel can show. Truth is the target frame turned about its optical centre,
@@ -264,12 +267,13 @@ def log_pose_sweep(model, batch, step=None, key='sweep', target=1, mode='rgb', y
         _show(axes[0, col], truths[col], f"truth {label}")
         _show(axes[1, col], renders[col], f"render {label}")
     for ax in axes.ravel(): ax.set(xticks=[], yticks=[])
+    if note: fig.suptitle(note, fontsize=9)
     fig.tight_layout()
 
     if wandb.run is not None:
         flat = torch.stack([r.flatten() for r in renders])
         spread = _row_corr(flat[:-1], flat[1:]).mean().item()  # 1.0 means the pose changes nothing
-        wandb.log({key: wandb.Image(fig), f"volume/viewpoint_sameness_{key[-1]}": spread}, step=step)
+        wandb.log({key: wandb.Image(fig), f"volume/viewpoint_sameness/{key.split(chr(47))[-1]}": spread}, step=step)
     plt.close(fig)
     return fig
 
@@ -321,24 +325,33 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
         for section in ("val/*", "volume/*", "train/recon_epoch", "train/lr"):
             run.define_metric(section, step_metric="epoch")
         # wandb keeps the running best itself, under a suffixed key: val/lift_agreement.max and
-        # val/scene_corr.min. A sweep should point at those rather than a hand-tracked _best
+        # val/scene_corr.min, which is what a sweep should be pointed at
         run.define_metric("val/lift_agreement", step_metric="epoch", summary="max")
         run.define_metric("val/scene_corr", step_metric="epoch", summary="min")
         run.define_metric("val/skill", step_metric="epoch", summary="max")
         run.define_metric("val/invented_density", step_metric="epoch", summary="min")
 
-        # fixed indices across the held-out trajectory, so every run logs the same scenes
-        picks = torch.linspace(0, len(test_loader.dataset) - 1, scenes).round().long().tolist()
-        samples = [tuple(x.unsqueeze(0) for x in test_loader.dataset[i]) for i in picks]
-        print(f'logging scenes {picks} of {len(test_loader.dataset)} val windows', flush=True)
-        global_step, best_corr, best_agree, first_epoch = 1, float("inf"), -1.0, 0
+        # two fixed val scenes, picked by index so they are identical in every run and comparable
+        # across them, plus one drawn fresh from training each time it is logged. The fixed pair
+        # shows whether the model is improving; the roving one shows what it is being shown, which
+        # a single held-out building cannot
+        val_set, train_set = test_loader.dataset, train_loader.dataset
+        picks = torch.linspace(0, len(val_set) - 1, max(scenes - 1, 1)).round().long().tolist()
+        samples = [tuple(x.unsqueeze(0) for x in val_set[i]) for i in picks]
+
+        def roving():
+            i = int(torch.randint(len(train_set), (1,)))
+            return tuple(x.unsqueeze(0) for x in train_set[i]), i
+
+        print(f"logging val scenes {picks} of {len(val_set)}, plus one drawn from training",
+              flush=True)
+        global_step, first_epoch = 1, 0
         if resume:  # weights alone are not enough: a schedule mid-slope needs its own state back
             ckpt = torch.load(resume, weights_only=False)
             model.load_state_dict(ckpt["model"])
             optimizer.load_state_dict(ckpt["optimizer"])
             if sched and ckpt.get("scheduler"): sched.load_state_dict(ckpt["scheduler"])
-            global_step, best_corr = ckpt["global_step"], ckpt["best_corr"]
-            best_agree = ckpt.get("best_agree", -1.0)
+            global_step = ckpt["global_step"]
             first_epoch = ckpt["epoch"]
             print(f'resumed {resume} at epoch {first_epoch}, lr {optimizer.param_groups[0]["lr"]:.2e}',
                   flush=True)
@@ -436,15 +449,11 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
                   f'scene corr {corr:.3f}, skill {skill:+.3f}, lift agree '
                   f'{sum(agree)/len(agree):.3f}, answerable {v_answerable:.1f}, '
                   f'invented {sum(invent)/len(invent):.3f}', flush=True)
-            # running bests, because a sweep reads the summary and summary keeps the last value
-            best_corr = min(best_corr, corr)
-            best_agree = max(best_agree, sum(agree) / len(agree))
             metrics = {"val/loss": v_loss, "val/recon": v_recon, "val/kl": v_kl,
-                       "val/scene_corr": corr, "val/scene_corr_best": best_corr,
+                       "val/scene_corr": corr,
                        "val/skill": skill, "val/recon_answerable": v_answerable,
                        "val/lift_agreement": sum(agree) / len(agree),
                        "val/invented_density": sum(invent) / len(invent),
-                       "val/lift_agreement_best": best_agree,
                        "train/recon_epoch": train_recon / max(train_batches, 1),
                        "train/lr": optimizer.param_groups[0]["lr"],
                        "epoch": epoch + 1}
@@ -454,14 +463,18 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
             if isinstance(sched, METRIC_DRIVEN): sched.step(v_recon)  # these step on the metric
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                         "scheduler": sched.state_dict() if sched else None,
-                        "epoch": epoch + 1, "global_step": global_step, "best_corr": best_corr,
-                        "best_agree": best_agree,
+                        "epoch": epoch + 1, "global_step": global_step,
                         "config": config}, CHECKPOINTS / f'{run.name}.pt')
 
             if epoch % n_epochs == 0:
-                for s, sample in enumerate(samples):
-                    log_novel_view(model, sample, step=global_step, mode=target, key=f'novel/scene{s}')
-                    log_pose_sweep(model, sample, step=global_step, mode=target, key=f'sweep/scene{s}')
+                sample, index = roving()
+                shown = [(f"scene{s}", x, "") for s, x in enumerate(samples)]
+                shown.append(("roving", sample, f"training window {index}"))
+                for name, sample, note in shown:
+                    log_novel_view(model, sample, step=global_step, mode=target,
+                                   key=f"novel/{name}", note=note)
+                    log_pose_sweep(model, sample, step=global_step, mode=target,
+                                   key=f"sweep/{name}", note=note)
     finally:
         run.finish()
 

@@ -4,6 +4,9 @@ Running log for the geometric VVAE — what experiments actually showed. The des
 
 ## Settled
 
+- **jitter and unknown only work together.** Alone, `unknown` scored *below* baseline on agreement (0.720 against 0.795) and `jitter` barely moved the fill. Together the decoded volume went from 58% solid to **10.1%**, against a lifted 10.0% — the first run whose geometry matched what was observed. Wider viewpoints are what make the machinery for representing ignorance worth carrying.
+- **That run had plateaued by its midpoint.** The second half of 80 epochs bought ~1% on `recon_answerable` and nothing on agreement. Not undertrained, so more epochs is not the lever — one house is.
+
 - **depth beats rgb** as the render target — 0.386 mean scene-corr against 0.454. Depth needs no appearance channel at all, so the volume drops from 4 channels to 1 and the latent stops paying to remember colour.
 - **mse beats an edge-aware loss** (0.277 against 0.388) even on depth, where the gradient term should have helped. The edge loss has been removed.
 - **onecycle beats the alternatives** — it led on skill in all four of its runs against `adaptive` and against a fixed cosine-with-restarts schedule since deleted. Best rate ~3e-3, well above the 1.3e-3 we assumed for a while.
