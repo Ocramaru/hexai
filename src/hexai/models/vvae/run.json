@@ -10,6 +10,6 @@
   "base_channels": 32,
   "groups": 4,
   "batch_size": 4,
-  "epochs": 25,
+  "epochs": 80,
   "stride": 1
 }

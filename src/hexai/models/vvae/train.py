@@ -71,6 +71,13 @@ scene_corr        how alike different scenes decode. Near 1 means the decoder is
                   its input. A model emitting noise also scores well, so never read alone.
 unknown_mae       how well the observedness channel matches the carving. Only with unknown=1.
 depth_mae_m       depth error in metres, the one number with a physical unit.
+decoded_solid     fraction of the decoded volume above the occupancy threshold, against
+lifted_occupied   the same fraction of the volume that was lifted from depth. Matching them
+                  is the goal; decoded far above lifted is a decoder filling in the room.
+
+Figures are under media/, three scenes each. scene0 and scene1 are fixed val windows, chosen
+by index so they are the same in every run; roving is drawn fresh from training each time, so
+it shows what the model is being fed rather than the one held-out building.
 
 wandb keeps the running best of the four that have one, under a suffixed key: read
 val/lift_agreement.max and val/invented_density.min, not the bare names. The summary a sweep
@@ -200,7 +207,7 @@ def _floor_plan(ax, density, pose, config, title):
 
 
 @torch.no_grad()
-def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb', note=''):
+def log_novel_view(model, batch, step=None, key='media/novel', target=1, mode='rgb', note=''):
     """Truth against the render, and the lifted volume against the decoded one. The image pair alone
     cannot tell undertrained from broken -- a saturated density field also renders flat grey -- so
     the volumes go beside it, and the density fractions go up as scalars."""
@@ -227,14 +234,14 @@ def log_novel_view(model, batch, step=None, key='novel', target=1, mode='rgb', n
 
     if wandb.run is not None:
         wandb.log({key: wandb.Image(fig),
-                   "volume/lifted_occupied": (lifted[3] > 1e-3).float().mean().item(),
-                   "volume/decoded_solid": (decoded[model.config.density_index] > 0.5).float().mean().item(),
-                   "volume/decoded_mean": decoded[model.config.density_index].mean().item()}, step=step)
+                   "val/lifted_occupied": (lifted[3] > 1e-3).float().mean().item(),
+                   "val/decoded_solid": (decoded[model.config.density_index] > 0.5).float().mean().item(),
+                   "val/decoded_mean": decoded[model.config.density_index].mean().item()}, step=step)
     plt.close(fig)
 
 
 @torch.no_grad()
-def log_pose_sweep(model, batch, step=None, key='sweep', target=1, mode='rgb', note='',
+def log_pose_sweep(model, batch, step=None, key='media/sweep', target=1, mode='rgb', note='',
                    yaws=(-24, -12, 12, 24)):
     """Truth over render, angle by angle. The latent is encoded once and rendered from each yaw, so
     a row that stays the same across the sweep is a latent that has stopped depending on viewpoint,
@@ -273,7 +280,7 @@ def log_pose_sweep(model, batch, step=None, key='sweep', target=1, mode='rgb', n
     if wandb.run is not None:
         flat = torch.stack([r.flatten() for r in renders])
         spread = _row_corr(flat[:-1], flat[1:]).mean().item()  # 1.0 means the pose changes nothing
-        wandb.log({key: wandb.Image(fig), f"volume/viewpoint_sameness/{key.split(chr(47))[-1]}": spread}, step=step)
+        wandb.log({key: wandb.Image(fig), f"val/viewpoint_sameness/{key.split(chr(47))[-1]}": spread}, step=step)
     plt.close(fig)
     return fig
 
@@ -322,7 +329,7 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
 
         # epoch as its own axis; runs with different steps_per_epoch only align on it
         run.define_metric("epoch")
-        for section in ("val/*", "volume/*", "train/recon_epoch", "train/lr"):
+        for section in ("val/*", "train/recon_epoch", "train/lr"):
             run.define_metric(section, step_metric="epoch")
         # wandb keeps the running best itself, under a suffixed key: val/lift_agreement.max and
         # val/scene_corr.min, which is what a sweep should be pointed at
@@ -472,9 +479,9 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
                 shown.append(("roving", sample, f"training window {index}"))
                 for name, sample, note in shown:
                     log_novel_view(model, sample, step=global_step, mode=target,
-                                   key=f"novel/{name}", note=note)
+                                   key=f"media/novel/{name}", note=note)
                     log_pose_sweep(model, sample, step=global_step, mode=target,
-                                   key=f"sweep/{name}", note=note)
+                                   key=f"media/sweep/{name}", note=note)
     finally:
         run.finish()
 
