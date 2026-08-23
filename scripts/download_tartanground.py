@@ -22,6 +22,15 @@ TARTAN = Path(os.environ.get("TARTAN_ROOT", ROOT / "data/tartanground"))
 CAMERAS = ("lcam_front",)
 MODALITIES = ("image", "depth", "meta")
 
+INDOOR = (
+  "House", "Office", "Hospital", "Restaurant", "Supermarket", "RetroOffice", "CountryHouse",
+  "ArchVizTinyHouseDay", "ArchVizTinyHouseNight", "OldBrickHouseDay", "OldBrickHouseNight",
+  "AmericanDiner", "HQWesternSaloon", "Prison", "AbandonedSchool", "CarWelding",
+  "IndustrialHangar", "Sewerage",
+)
+"""Rooms and corridors at something like a house's scale, which is what the robot will meet. The
+rest of the catalogue is outdoors, fantasy, or city-sized: real scenes, but not this robot's."""
+
 
 def run_in_toolbox(body: str) -> int:
   python = os.environ.get("TARTANAIR_PYTHON")
@@ -33,12 +42,26 @@ def run_in_toolbox(body: str) -> int:
 def main() -> None:
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument("envs", nargs="*", help="environment names; omit to list what is available")
+  p.add_argument("--indoor", action="store_true", help=f"the {len(INDOOR)} indoor environments")
+  p.add_argument("--all", action="store_true", help="everything in the catalogue, ~400 GB")
   p.add_argument("--version", default="omni")
   args = p.parse_args()
 
   TARTAN.mkdir(parents=True, exist_ok=True)
   have = sorted(d.name for d in TARTAN.iterdir() if d.is_dir() and not d.name.startswith("."))
   print(f"already at {TARTAN}: {have or 'nothing'}")
+
+  if args.all or args.indoor:
+    if args.indoor:
+      args.envs = list(INDOOR)
+    else:
+      listing = subprocess.run(
+        [os.environ.get("TARTANAIR_PYTHON", "python"), "-c", textwrap.dedent(f"""
+          import tartanair as ta
+          ta.init({str(TARTAN)!r})
+          print(",".join(ta.list_envs()["remote"]))
+        """)], capture_output=True, text=True)
+      args.envs = listing.stdout.strip().splitlines()[-1].split(",")
 
   if not args.envs:
     raise SystemExit(run_in_toolbox(f"""
@@ -51,7 +74,8 @@ def main() -> None:
   if not wanted:
     print("nothing to do, all requested environments are already on disk")
     return
-  print(f"downloading {wanted}")
+  print(f"downloading {len(wanted)}: {wanted}")
+  print(f"roughly {5.4 * len(wanted):.0f} GB at House's size, and environments vary")
   raise SystemExit(run_in_toolbox(f"""
     import os
     os.environ["MPLBACKEND"] = "Agg"          # the toolbox draws on import

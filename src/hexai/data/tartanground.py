@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler, Subset
 
 from hexai.utilities.camera import pixel_to_camera_ray
 
@@ -220,10 +220,17 @@ class TartanGroundWindowDataset(Dataset[Sample]):
     self._window_trajectory: list[Path] = []  # which trajectory_path each window came from
     self._window_camera: list[str] = []  # and which camera
     self._window_poses: list[np.ndarray] = []
+    skipped: list[str] = []
     for trajectory_path in self.trajectory_paths:
       for camera_name in self.camera_names:
-        pairs = _frame_pairs(trajectory_path, camera_name)
-        poses = _read_poses(trajectory_path, camera_name) if self.include_pose else None
+        # a download in progress leaves environments half-written, so step over what is not
+        # there yet rather than failing the whole dataset
+        try:
+          pairs = _frame_pairs(trajectory_path, camera_name)
+          poses = _read_poses(trajectory_path, camera_name) if self.include_pose else None
+        except FileNotFoundError:
+          skipped.append(f"{trajectory_path.parent.parent.name}/{trajectory_path.name}")
+          continue
         if poses is not None and len(poses) != len(pairs):
           raise ValueError(f"{len(poses)} poses for {len(pairs)} frames in {trajectory_path}")
 
@@ -234,6 +241,11 @@ class TartanGroundWindowDataset(Dataset[Sample]):
           if poses is not None:
             self._window_poses.append(_relative_poses(poses[start : start + self.num_frames]))
 
+    if skipped:
+      print(f"skipping {len(skipped)} incomplete trajectories: {', '.join(sorted(set(skipped))[:4])}"
+            f"{' ...' if len(skipped) > 4 else ''}")
+    if not self._windows:
+      raise FileNotFoundError(f"no complete trajectories under {self.trajectory_paths[:1]}")
     first_image = cv2.imread(str(self._windows[0][0][0]), cv2.IMREAD_COLOR)
     if first_image is None:
       raise FileNotFoundError(self._windows[0][0][0])
@@ -309,6 +321,17 @@ class TartanGroundWindowDataset(Dataset[Sample]):
       raise ValueError(f"no windows for {sorted(paths)} x {sorted(cameras)}")
     return TartanGroundSubset(self, indices)
 
+  @property
+  def loaded_trajectories(self) -> list[Path]:
+    """The trajectories that actually produced windows, which is not `trajectory_paths` while a
+    download is still filling environments in."""
+    present = set(self._window_trajectory)
+    return [p for p in self.trajectory_paths if p in present]
+
+  def window_trajectory(self, index: int) -> Path:
+    """Which trajectory a window came from, and so which environment."""
+    return self._window_trajectory[index]
+
   def __getitem__(self, index: int) -> Sample:
     window = self._windows[index]
     heads = self._sample_head_rotations(len(window))
@@ -349,7 +372,7 @@ class TartanGroundSubset(Subset[Sample]):
 
   @property
   def trajectory_paths(self) -> list[Path]:
-    present = {self.dataset._window_trajectory[i] for i in self.indices}
+    present = {self.dataset.window_trajectory(i) for i in self.indices}
     return [p for p in self.dataset.trajectory_paths if p in present]
 
   @property
@@ -419,6 +442,39 @@ def make_dataloader(
   )
 
 
+class EnvironmentSampler(Sampler[int]):
+  """Draws each epoch from a random handful of environments rather than all of them.
+
+  An epoch then costs the same however many are downloaded, which is what makes a large catalogue
+  usable: 18 environments at once is 88 minutes an epoch, five is a quarter of that, and over
+  enough epochs every environment still gets seen. Grouping by environment rather than sampling
+  windows at random keeps a batch coherent -- the model sees one building's statistics at a time,
+  the way it will on the robot.
+  """
+
+  def __init__(self, subset: TartanGroundSubset, envs_per_epoch: int,
+               samples_per_epoch: int | None = None, seed: int = 0):
+    self.by_env: dict[str, list[int]] = {}
+    for position, index in enumerate(subset.indices):
+      env = environment_of(subset.dataset.window_trajectory(index))
+      self.by_env.setdefault(env, []).append(position)
+    self.envs_per_epoch = min(envs_per_epoch, len(self.by_env))
+    self.generator = torch.Generator().manual_seed(seed)
+    # a fixed count regardless of which environments come up, so every epoch is the same size
+    self.samples = samples_per_epoch or round(len(subset) * self.envs_per_epoch / len(self.by_env))
+
+  def __len__(self) -> int:
+    return self.samples
+
+  def __iter__(self):
+    names = list(self.by_env)
+    picked = torch.randperm(len(names), generator=self.generator)[: self.envs_per_epoch]
+    pool = [i for p in picked for i in self.by_env[names[int(p)]]]
+    draw = torch.randint(len(pool), (self.samples,), generator=self.generator) \
+      if self.samples > len(pool) else torch.randperm(len(pool), generator=self.generator)[: self.samples]
+    return (pool[int(i)] for i in draw)
+
+
 @dataclass(frozen=True)
 class TartanGroundConfig:
   """Everything a run needs from the data, in one object: which environments, how windows are cut,
@@ -446,6 +502,7 @@ class TartanGroundConfig:
 
   batch_size: int = 4
   num_workers: int = 6
+  envs_per_epoch: int | None = None  # None uses every environment each epoch
 
   @property
   def camera(self) -> tuple[tuple[int, int], float, float]:
@@ -475,26 +532,34 @@ class TartanGroundConfig:
   def build(self) -> tuple[Subset, Subset, str]:
     """(train, val, what was held out)."""
     ds = self.dataset()
-    envs = sorted({environment_of(t) for t in ds.trajectory_paths})
+    have = ds.loaded_trajectories  # not what was asked for, if a download is still running
+    envs = sorted({environment_of(t) for t in have})
     if len(envs) > 1:
       held = self.val_env or envs[-1]
       if held not in envs:
-        raise ValueError(f"val_env {held!r} is not among {envs}")
-      val = [t for t in ds.trajectory_paths if environment_of(t) == held]
-      train = [t for t in ds.trajectory_paths if environment_of(t) != held]
+        raise ValueError(f"val_env {held!r} is not among the environments present: {envs}")
+      val = [t for t in have if environment_of(t) == held]
+      train = [t for t in have if environment_of(t) != held]
     else:
       held = f"{envs[0]} by trajectory, only one environment present"
-      val, train = ds.trajectory_paths[:1], ds.trajectory_paths[1:]
+      val, train = have[:1], have[1:]
     return ds.get_trajectory(train), ds.get_trajectory(val), held
 
   def loaders(self) -> tuple[DataLoader, DataLoader, str]:
     """(train, val, a line describing the split). Both shuffled: at stride 1 an unshuffled batch
     is near-identical windows, which any across-batch metric reads as the model collapsing."""
     train, val, held = self.build()
-    make = lambda s: make_dataloader(  # noqa: E731
-      s, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers
+    make = lambda s, **kw: make_dataloader(  # noqa: E731
+      s, batch_size=self.batch_size, num_workers=self.num_workers, **kw
     )
-    return make(train), make(val), f"{len(train)} train / {len(val)} val windows, holding out {held}"
+    if self.envs_per_epoch:
+      sampler = EnvironmentSampler(train, self.envs_per_epoch)
+      train_loader = make(train, sampler=sampler)
+      note = f", {sampler.samples} of them an epoch from {sampler.envs_per_epoch} environments"
+    else:
+      train_loader, note = make(train, shuffle=True), ""
+    return (train_loader, make(val, shuffle=True),
+            f"{len(train)} train / {len(val)} val windows, holding out {held}{note}")
 
 
 def combine(*configs: TartanGroundConfig) -> tuple[DataLoader, DataLoader, str]:

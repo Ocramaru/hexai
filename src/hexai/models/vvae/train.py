@@ -482,6 +482,7 @@ def main():
     parser.add_argument("--image_size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=1)  # 1 overlaps windows, 5 does not
     parser.add_argument("--envs")  # comma separated; all of TARTAN_ROOT if unset
+    parser.add_argument("--envs_per_epoch", type=int, default=0)  # 0 uses them all
     parser.add_argument("--val_env")  # which environment to hold out
     parser.add_argument("--num_frames", type=int, default=7)
     parser.add_argument("--jitter", type=int, default=1)  # see JITTER_FOVY, and implies masking
@@ -506,6 +507,7 @@ def main():
         include_head_jitter=bool(args.jitter),
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        envs_per_epoch=args.envs_per_epoch or None,
     )
     train_loader, test_loader, summary = data.loaders()
     loaders = (train_loader, test_loader)
