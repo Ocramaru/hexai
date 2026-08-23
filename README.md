@@ -76,4 +76,4 @@ Progress is written up in [devlog/](devlog/), newest first.
 
 ## License
 
-Apache-2.0. Author: Marco Cassar ([@Ocramaru](https://github.com/Ocramaru)).
+Apache-2.0. Marco Cassar — [@Ocramaru](https://github.com/Ocramaru), <dev@marcocassar.info>.
