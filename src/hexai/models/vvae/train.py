@@ -36,6 +36,7 @@ from tqdm import tqdm as _tqdm
 from hexai.data import (
     TartanGroundWindowDataset,
     add_pose_noise,
+    environment_of,
     find_trajectory_dirs,
     make_dataloader,
     split_context_target,
@@ -46,7 +47,7 @@ from hexai.utilities import AdaptiveRestarts
 from hexai.utilities.camera import pixel_to_camera_ray
 
 ROOT = Path(__file__).resolve().parents[4]
-HOUSE = Path(os.environ.get("TARTAN_ROOT", ROOT / "data/tartanground")) / "House/Data_omni"
+TARTAN = Path(os.environ.get("TARTAN_ROOT", ROOT / "data/tartanground"))
 CHECKPOINTS = Path(__file__).parent / ".runs"  # gitignored, beside the code it belongs to
 
 # a bar redraws over itself on a terminal but floods a redirected log, so drop it when piped
@@ -295,6 +296,8 @@ def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0
         "steps_per_epoch": len(train_loader),
         "camera_fovy": dataset.camera[1],
         "num_frames": dataset.num_frames,
+        "environments": sorted({environment_of(p) for p in train_loader.dataset.trajectory_paths}),
+        "val_env": sorted({environment_of(p) for p in test_loader.dataset.trajectory_paths}),
         "head_jitter": dataset.include_head_jitter,
         "grid": model.config.grid_resolution,
         "latent": model.config.latent_shape,
@@ -480,6 +483,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--image_size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=1)  # 1 overlaps windows, 5 does not
+    parser.add_argument("--env")  # one environment, or all of TARTAN_ROOT if unset
+    parser.add_argument("--val_env")  # which environment to hold out
     parser.add_argument("--num_frames", type=int, default=7)
     parser.add_argument("--jitter", type=int, default=1)  # see JITTER_FOVY, and implies masking
     parser.add_argument("--num_workers", type=int, default=6)
@@ -492,18 +497,29 @@ def main():
     np.random.seed(args.seed)
 
     hw = (args.image_size, args.image_size)
+    trajectories = find_trajectory_dirs(TARTAN / args.env if args.env else TARTAN)
     dataset = TartanGroundWindowDataset(
-        trajectory_paths=find_trajectory_dirs(HOUSE), num_frames=args.num_frames, image_hw=hw,
+        trajectory_paths=trajectories, num_frames=args.num_frames, image_hw=hw,
         include_pose=True, stride=args.stride,
         head_fovy_deg=JITTER_FOVY if args.jitter else None, include_head_jitter=bool(args.jitter),
     )
-    splits = [dataset.get_trajectory(paths)
-              for paths in (dataset.trajectory_paths[1:], dataset.trajectory_paths[:1])]
+    # hold out a whole environment when there is more than one. A second walk through the same
+    # building shares its geometry, so it measures memorisation more than it measures transfer
+    envs = sorted({environment_of(t) for t in dataset.trajectory_paths})
+    if len(envs) > 1:
+        held = args.val_env or envs[-1]
+        val_paths = [t for t in dataset.trajectory_paths if environment_of(t) == held]
+        train_paths = [t for t in dataset.trajectory_paths if environment_of(t) != held]
+    else:
+        held = f"{envs[0]} (one environment, so the split is by trajectory)"
+        val_paths, train_paths = dataset.trajectory_paths[:1], dataset.trajectory_paths[1:]
+    splits = [dataset.get_trajectory(train_paths), dataset.get_trajectory(val_paths)]
     # val shuffles too: at stride 1 an unshuffled batch is near-identical windows, which
     # scene_corr would read as the decoder collapsing
     loaders = [make_dataloader(s, batch_size=args.batch_size, shuffle=True,
                                num_workers=args.num_workers) for s in splits]
-    print(f"{len(dataset)} windows, {len(splits[0])} train / {len(splits[1])} val", flush=True)
+    print(f"{len(dataset)} windows over {len(envs)} env(s), {len(splits[0])} train / "
+          f"{len(splits[1])} val, holding out {held}", flush=True)
 
     channels, groups = args.base_channels, args.groups
     model = VVAEGeometric(VVAEGeometricConfig(render_hw=hw, n_downsamples=2, downsample_scale=2,

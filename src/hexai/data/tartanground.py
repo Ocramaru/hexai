@@ -371,10 +371,28 @@ class TartanGroundSubset(Subset[Sample]):
     return TartanGroundSubset(self.dataset, indices)
 
 
-def find_trajectory_dirs(house_root: Path) -> list[Path]:
-  """All trajectory directories under a TartanGround env/version folder,
-  e.g. `data/tartanground/House/Data_omni` -> its P0000/P0001/P0002 children."""
-  return sorted(p for p in house_root.iterdir() if p.is_dir())
+def find_trajectory_dirs(root: Path, version: str = "Data_omni") -> list[Path]:
+  """Every trajectory directory under `root`, which may be one environment or many.
+
+  `data/tartanground/House/Data_omni` gives that house's P0000/P0001/P0002. `data/tartanground`
+  gives the same for every environment downloaded under it."""
+  if root.name.startswith("Data_"):
+    return sorted(p for p in root.iterdir() if p.is_dir())
+  if (root / version).is_dir():
+    return sorted(p for p in (root / version).iterdir() if p.is_dir())
+  found: list[Path] = []
+  for env in sorted(root.iterdir()):
+    versioned = env / version
+    if versioned.is_dir():
+      found.extend(p for p in sorted(versioned.iterdir()) if p.is_dir())
+  return found
+
+
+def environment_of(trajectory: Path) -> str:
+  """Which TartanGround environment a trajectory belongs to. Splitting on this rather than on
+  trajectories holds out a whole building, where a second walk through the same one is a much
+  weaker test."""
+  return trajectory.parent.parent.name
 
 
 def make_dataloader(

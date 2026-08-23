@@ -17,7 +17,15 @@ uv run python -m hexai.models.vvae.train --help
 ```
 
 Training data is [TartanGround](https://tartanair.org/). Point `TARTAN_ROOT` at it, or place it at
-`./data/tartanground`.
+`./data/tartanground`. The toolbox that fetches it pins its own dependencies, so it lives in a
+separate checkout:
+
+```bash
+TARTANAIR_PYTHON=../tartanairpy/.venv/bin/python uv run python scripts/download_tartanground.py Office
+```
+
+Training spans every environment under that root and holds one out for validation, so a run is
+scored on a building it has never seen.
 
 ## Tracking
 
