@@ -51,6 +51,8 @@ Early. The VVAE trains and its geometry is verified, but it has yet to produce a
 see [its notes](src/hexai/models/vvae/.agents/learned.md). Most of the stack still lives in a fork
 of mjlab and is [migrating across](.agents/todo.md) a module at a time.
 
+Progress is written up in [devlog/](devlog/), newest first.
+
 ## License
 
 Apache-2.0. Author: Marco Cassar ([@Ocramaru](https://github.com/Ocramaru)).
