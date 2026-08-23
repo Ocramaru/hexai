@@ -21,4 +21,8 @@ else's repo.
 `hexai/utilities` depends on nothing, `hexai/data` on utilities, `hexai/models` on both. Strictly
 one direction — nothing leans back up.
 
+Where a new file goes: `utilities` if a second model would plausibly want it, `models` if it is
+specific to one. Geometry, camera intrinsics and schedulers all moved out of the VVAE on that
+test.
+
 Open work, including what is still to migrate out of the fork, is in [todo.md](todo.md).

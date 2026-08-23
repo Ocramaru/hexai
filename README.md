@@ -26,7 +26,7 @@ Training data is [TartanGround](https://tartanair.org/). Point `TARTAN_ROOT` at 
 | `hexai/assets/hexapod/` | the robot: constants measured from CAD and calibrated on hardware, and the MJCF mjlab simulates |
 | `hexai/models/vvae/` | posed camera frames in, a 3D scene latent out — see its [README](src/hexai/models/vvae/README.md) |
 | `hexai/data/` | datasets and loaders |
-| `hexai/utilities/` | tied to no model: geometry, camera intrinsics, decay shapes, schedulers |
+| `hexai/utilities/` | geometry, camera intrinsics, decay shapes, schedulers |
 
 Dependencies run one way: `utilities` needs nothing, `data` needs `utilities`, `models` needs both.
 
