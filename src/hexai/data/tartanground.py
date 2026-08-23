@@ -529,7 +529,7 @@ class TartanGroundConfig:
       include_head_jitter=self.include_head_jitter,
     )
 
-  def build(self) -> tuple[Subset, Subset, str]:
+  def build(self) -> tuple[TartanGroundSubset, TartanGroundSubset, str]:
     """(train, val, what was held out)."""
     ds = self.dataset()
     have = ds.loaded_trajectories  # not what was asked for, if a download is still running
