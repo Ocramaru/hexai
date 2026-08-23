@@ -5,7 +5,7 @@ Perception and learning for the Freenove Big Hexapod. Simulation, assets and mat
 
 ```bash
 uv sync                                    # installs hexai and mjlab editable
-uv run python -m hexai.vvae.train --help
+uv run python -m hexai.models.vvae.train --help
 ```
 
 Set `TARTAN_ROOT` if the TartanGround data is not at `./data/tartanground` (it symlinks to mjlab's by default).
@@ -14,8 +14,8 @@ Set `TARTAN_ROOT` if the TartanGround data is not at `./data/tartanground` (it s
 
 | | |
 |---|---|
-| `src/hexai/vvae/` | the geometric VVAE: posed frames in, a 3D scene latent out. See its [README](src/hexai/vvae/README.md) |
-| `src/hexai/utilities/` | model-agnostic pieces: decay shapes, schedulers |
+| `src/hexai/models/vvae/` | the geometric VVAE: posed frames in, a 3D scene latent out. See its [README](src/hexai/models/vvae/README.md) |
+| `src/hexai/models/utilities/` | model-agnostic pieces: decay shapes, schedulers |
 
 ## Agent notes
 

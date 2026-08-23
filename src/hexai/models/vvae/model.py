@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from hexai.vvae.geometry import carve_window, lift_window, render_view
+from hexai.models.vvae.geometry import carve_window, lift_window, render_view
 
 
 @dataclass

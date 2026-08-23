@@ -32,15 +32,15 @@ Truth on top, render below, as the query camera pans. A latent holding a scene c
 
 ```bash
 # one run -- checkpoints land in .runs/, named after the flags that vary
-uv run python -m hexai.vvae.train --jitter=1 --lr=0.003
+uv run python -m hexai.models.vvae.train --jitter=1 --lr=0.003
 
 # a sweep
-uv run wandb sweep src/hexai/vvae/sweep.json
+uv run wandb sweep src/hexai/models/vvae/sweep.json
 wandb agent <entity>/<project>/<sweep_id>
 
 # continue a run without restarting its schedule, then anneal it out
-uv run python -m hexai.vvae.train --resume .runs/<name>.pt --epochs 20
-uv run python -m hexai.vvae.train --resume .runs/<name>.pt --epochs 20 --taper 1
+uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20
+uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20 --taper 1
 ```
 
 `--jitter` aims the head each frame, which is what the pan/tilt servos do on the robot, and masks the loss over pixels no input frame saw.

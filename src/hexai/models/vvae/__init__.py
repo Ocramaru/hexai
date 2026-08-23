@@ -6,14 +6,14 @@ Agentic info lives in `.agents/` Look at it for info regarding previous experime
 Author: Marco Cassar (@Ocramaru)
 """
 
-from hexai.vvae.geometry import (
+from hexai.models.vvae.geometry import (
   carve_window,
   lift_window,
   pixel_to_camera_ray,
   render_view,
   scatter_to_grid,
 )
-from hexai.vvae.model import (
+from hexai.models.vvae.model import (
   VVAE,
   VVAEConfig,
   VVAEGeometric,
