@@ -1,3 +1,6 @@
+# pyright: reportAttributeAccessIssue=false
+# mujoco's C bindings ship no stubs, so MjSpec and its members are invisible to pyright.
+# Scoped to this file rather than disabled repo-wide, where the rule catches real typos.
 """Freenove Big Hexapod Kit constants.
 
 Geometry is measured from the manufacturer's STEP assembly; see the header of

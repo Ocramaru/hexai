@@ -32,3 +32,8 @@ ignore = ["B011", "E701"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hexai"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"

@@ -34,11 +34,9 @@ from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_angle_axis, qua
 from tqdm import tqdm as _tqdm
 
 from hexai.data import (
-    TartanGroundWindowDataset,
+    TartanGroundConfig,
     add_pose_noise,
     environment_of,
-    find_trajectory_dirs,
-    make_dataloader,
     split_context_target,
     target_view,
 )
@@ -497,35 +495,26 @@ def main():
     np.random.seed(args.seed)
 
     hw = (args.image_size, args.image_size)
-    trajectories = find_trajectory_dirs(TARTAN / args.env if args.env else TARTAN)
-    dataset = TartanGroundWindowDataset(
-        trajectory_paths=trajectories, num_frames=args.num_frames, image_hw=hw,
-        include_pose=True, stride=args.stride,
-        head_fovy_deg=JITTER_FOVY if args.jitter else None, include_head_jitter=bool(args.jitter),
+    data = TartanGroundConfig(
+        root=TARTAN / args.env if args.env else TARTAN,
+        val_env=args.val_env,
+        num_frames=args.num_frames,
+        stride=args.stride,
+        image_hw=(args.image_size, args.image_size),
+        head_fovy_deg=JITTER_FOVY if args.jitter else None,
+        include_head_jitter=bool(args.jitter),
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
-    # hold out a whole environment when there is more than one. A second walk through the same
-    # building shares its geometry, so it measures memorisation more than it measures transfer
-    envs = sorted({environment_of(t) for t in dataset.trajectory_paths})
-    if len(envs) > 1:
-        held = args.val_env or envs[-1]
-        val_paths = [t for t in dataset.trajectory_paths if environment_of(t) == held]
-        train_paths = [t for t in dataset.trajectory_paths if environment_of(t) != held]
-    else:
-        held = f"{envs[0]} (one environment, so the split is by trajectory)"
-        val_paths, train_paths = dataset.trajectory_paths[:1], dataset.trajectory_paths[1:]
-    splits = [dataset.get_trajectory(train_paths), dataset.get_trajectory(val_paths)]
-    # val shuffles too: at stride 1 an unshuffled batch is near-identical windows, which
-    # scene_corr would read as the decoder collapsing
-    loaders = [make_dataloader(s, batch_size=args.batch_size, shuffle=True,
-                               num_workers=args.num_workers) for s in splits]
-    print(f"{len(dataset)} windows over {len(envs)} env(s), {len(splits[0])} train / "
-          f"{len(splits[1])} val, holding out {held}", flush=True)
+    train_loader, test_loader, summary = data.loaders()
+    loaders = (train_loader, test_loader)
+    print(summary, flush=True)
 
     channels, groups = args.base_channels, args.groups
     model = VVAEGeometric(VVAEGeometricConfig(render_hw=hw, n_downsamples=2, downsample_scale=2,
                                               kernel_size=3, base_channels=channels, groups=groups,
                                               target=args.target, predict_unknown=bool(args.unknown),
-                                              source_fovy_deg=dataset.camera[1]))
+                                              source_fovy_deg=data.camera[1]))
     train_geometric(model, *loaders, scheduler=args.scheduler,
                     target=args.target, kl_mode="observed" if args.unknown else "uniform", mask_unknown=bool(args.jitter),
                     resume=args.resume, taper=bool(args.taper),

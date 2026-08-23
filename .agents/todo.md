@@ -24,6 +24,12 @@ where the work actually happens.
 
 ## Housekeeping
 
+- [ ] `mujoco.MjSpec` has no stub, so pyright reports it in `assets/hexapod`. Downgraded to a
+      warning; mjlab solves it by generating stubs (`typings/generate_mujoco_stubs.sh`) if it ever
+      becomes worth doing here.
+- [ ] ROS puts its own Python on `PYTHONPATH`, which shadows the venv. `env -u PYTHONPATH` before
+      pytest, or drop it from the shell profile.
+
 
 - [ ] `data/` is a symlink to `../mjlab/data`. Fine locally; set `TARTAN_ROOT` elsewhere.
 - [ ] No tests in this repo yet. `tests/test_geometry.py` is owed from the VVAE work — see

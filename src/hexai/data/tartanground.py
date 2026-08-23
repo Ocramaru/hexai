@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 
 from hexai.utilities.camera import pixel_to_camera_ray
 
@@ -417,3 +417,116 @@ def make_dataloader(
     prefetch_factor=2 if num_workers > 0 else None,
     **kwargs,
   )
+
+
+@dataclass(frozen=True)
+class TartanGroundConfig:
+  """Everything a run needs from the data, in one object: which environments, how windows are cut,
+  what the camera is, and how the split falls.
+
+  `build()` returns the train and validation subsets, `loaders()` wraps them. The split holds out
+  a whole environment when more than one is present, since a second walk through the same building
+  shares its geometry and would measure memorisation rather than transfer.
+  """
+
+  root: Path
+  envs: tuple[str, ...] | None = None  # None takes every environment under root
+  val_env: str | None = None  # None holds out the last alphabetically
+  version: str = "Data_omni"
+
+  num_frames: int = 7
+  stride: int | None = 1
+  image_hw: tuple[int, int] = (64, 64)
+  camera_names: tuple[str, ...] = ("lcam_front",)
+  depth_max: float = 4.0
+
+  source_fovy_deg: float = 90.0  # the cube faces the data was rendered with
+  head_fovy_deg: float | None = None  # re-render at the robot's lens instead
+  include_head_jitter: bool = False  # aim each frame, rather than straight ahead
+
+  batch_size: int = 4
+  num_workers: int = 6
+
+  @property
+  def camera(self) -> tuple[tuple[int, int], float, float]:
+    """What a model has to be built with to match this data. Compare against the model's own
+    `camera`: only image_hw mismatches loudly, the other two agree on shape and quietly place
+    every point at the wrong angle or distance."""
+    return self.image_hw, self.head_fovy_deg or self.source_fovy_deg, self.depth_max
+
+  def trajectories(self) -> list[Path]:
+    if self.envs:
+      return [t for e in self.envs for t in find_trajectory_dirs(self.root / e, self.version)]
+    return find_trajectory_dirs(self.root, self.version)
+
+  def dataset(self) -> "TartanGroundWindowDataset":
+    return TartanGroundWindowDataset(
+      trajectory_paths=self.trajectories(),
+      num_frames=self.num_frames,
+      stride=self.stride,
+      camera_names=self.camera_names,
+      depth_max=self.depth_max,
+      image_hw=self.image_hw,
+      include_pose=True,
+      source_fovy_deg=self.source_fovy_deg,
+      head_fovy_deg=self.head_fovy_deg,
+      include_head_jitter=self.include_head_jitter,
+    )
+
+  def build(self) -> tuple[Subset, Subset, str]:
+    """(train, val, what was held out)."""
+    ds = self.dataset()
+    envs = sorted({environment_of(t) for t in ds.trajectory_paths})
+    if len(envs) > 1:
+      held = self.val_env or envs[-1]
+      if held not in envs:
+        raise ValueError(f"val_env {held!r} is not among {envs}")
+      val = [t for t in ds.trajectory_paths if environment_of(t) == held]
+      train = [t for t in ds.trajectory_paths if environment_of(t) != held]
+    else:
+      held = f"{envs[0]} by trajectory, only one environment present"
+      val, train = ds.trajectory_paths[:1], ds.trajectory_paths[1:]
+    return ds.get_trajectory(train), ds.get_trajectory(val), held
+
+  def loaders(self) -> tuple[DataLoader, DataLoader, str]:
+    """(train, val, a line describing the split). Both shuffled: at stride 1 an unshuffled batch
+    is near-identical windows, which any across-batch metric reads as the model collapsing.
+
+    The description carries the sizes because a DataLoader does not expose them in a way a type
+    checker accepts, and every caller wants to print them."""
+    train, val, held = self.build()
+    make = lambda s: make_dataloader(  # noqa: E731
+      s, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers
+    )
+    return make(train), make(val), f"{len(train)} train / {len(val)} val windows, holding out {held}"
+
+
+def combine(*configs: TartanGroundConfig) -> tuple[DataLoader, DataLoader, str]:
+  """Train on several configs at once, each contributing its own windows.
+
+  Useful when one source should be cut differently from another -- a wider window here, head
+  jitter there -- since a single config applies one recipe to everything. Validation still comes
+  from one config, the first, so the held-out set stays a single clean thing rather than a blend.
+
+  Every config must agree on `camera`; a model is built for exactly one, and a mismatch places
+  points at the wrong angle without failing.
+  """
+  if not configs:
+    raise ValueError("combine() needs at least one config")
+  cameras = {c.camera for c in configs}
+  if len(cameras) > 1:
+    raise ValueError(f"configs disagree on the camera: {sorted(cameras)}")
+
+  trains, val, held = [], None, ""
+  for i, c in enumerate(configs):
+    tr, va, h = c.build()
+    trains.append(tr)
+    if i == 0:
+      val, held = va, h
+  first = configs[0]
+  train = trains[0] if len(trains) == 1 else ConcatDataset(trains)
+  make = lambda s: make_dataloader(  # noqa: E731
+    s, batch_size=first.batch_size, shuffle=True, num_workers=first.num_workers
+  )
+  assert val is not None
+  return make(train), make(val), f"{len(train)} train / {len(val)} val windows, holding out {held}"

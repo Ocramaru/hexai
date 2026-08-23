@@ -1,3 +1,6 @@
+# pyright: reportAttributeAccessIssue=false
+# mujoco's C bindings ship no stubs, so MjSpec and its members are invisible to pyright.
+# Scoped to this file rather than disabled repo-wide, where the rule catches real typos.
 """Geometry regression tests for the Freenove hexapod MJCF.
 
 Every expected value here was measured from the manufacturer's STEP assembly
@@ -20,8 +23,8 @@ from hexai.assets.hexapod.hexapod_constants import get_spec
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 needs_scripts = pytest.mark.skipif(
-  not SCRIPTS.is_dir(),
-  reason="cross-checks a constant against the training scripts, which are still in the mjlab fork",
+  not (SCRIPTS / "train_hexapod.py").exists(),
+  reason="cross-checks a constant against train_hexapod*.py, still in the mjlab fork",
 )
 
 HEXAPOD_XML = (
