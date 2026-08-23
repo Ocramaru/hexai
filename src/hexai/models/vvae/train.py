@@ -21,6 +21,7 @@ import os
 os.environ["MPLBACKEND"] = "Agg"  # no display on a detached session
 
 import argparse
+import json
 import sys
 from functools import partial
 from pathlib import Path
@@ -488,8 +489,18 @@ def main():
     parser.add_argument("--jitter", type=int, default=1)  # see JITTER_FOVY, and implies masking
     parser.add_argument("--num_workers", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--config")  # a json of any of these options
     parser.add_argument("--resume")  # a checkpoint to carry on from
     parser.add_argument("--taper", type=int, default=0)  # anneal out instead of holding rate back
+    # a run's parameters belong in a file, so it can be repeated and diffed. Anything given on
+    # the command line still wins, which is what makes a config a starting point rather than a cage
+    known, _ = parser.parse_known_args()
+    if known.config:
+        overrides = json.loads(Path(known.config).read_text())
+        unknown = set(overrides) - {a.dest for a in parser._actions}  # noqa: SLF001
+        if unknown:
+            raise SystemExit(f"{known.config} sets unknown options: {sorted(unknown)}")
+        parser.set_defaults(**overrides)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)

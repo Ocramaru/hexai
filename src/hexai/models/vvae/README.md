@@ -31,12 +31,10 @@ Truth on top, render below, as the query camera pans. A latent holding a scene c
 ## Running it
 
 ```bash
-# one run -- checkpoints land in .runs/, named after the flags that vary
-uv run python -m hexai.models.vvae.train --jitter=1 --lr=0.003
+# a run's parameters live in run.json; anything on the command line overrides it
+uv run python -m hexai.models.vvae.train --config src/hexai/models/vvae/run.json
 
-# a sweep
-uv run wandb sweep src/hexai/models/vvae/sweep.json
-wandb agent <entity>/<project>/<sweep_id>
+# checkpoints land in .runs/, named after whatever differs from the defaults
 
 # continue a run without restarting its schedule, then anneal it out
 uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20
