@@ -5,6 +5,11 @@ Repo-wide tasks. Per-package notes live in that package's own `.agents/`.
 The plan for migrating the rest of the stack out of the fork lives in `../mjlab/.agents/todo.md`,
 where the work actually happens.
 
+## Owed
+
+- [ ] Three tests in `tests/test_hexapod_geometry.py` skip until the training scripts move: they
+      cross-check `HEXAPOD_HEAD_ENVELOPE_MAX_M` and `BODY_GEOMS` against `train_hexapod*.py`.
+
 ## Housekeeping
 
 
