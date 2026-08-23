@@ -38,7 +38,9 @@ class VVAEConfig:
   # double per level, so fewer levels matters a lot at large input_frame_hw)
 
   use_skips: bool = True  # enable skipping connections between encoder and decoder
-  norm: Callable[[int], nn.Module] | None = partial(nn.GroupNorm, 8)  # or nn.BatchNorm3d, None
+  norm: Callable[[int], nn.Module] | None = partial(
+    nn.GroupNorm, 8
+  )  # or nn.BatchNorm3d, None
   dropout: float = 0.0  # Try out some levels of dropout | 0 equals no dropout
   groups: int = 1  # nn.Conv3d groups, 1 is none
 
@@ -55,18 +57,28 @@ class VVAEConfig:
   # TODO: test out different types of grouping / groupnorm
 
   def __post_init__(self):
-    self.latent_shape = (self.latent_channels, self.cube_size, self.cube_size, self.cube_size)  # shape of latent space [C, D, H, W]
+    self.latent_shape = (
+      self.latent_channels,
+      self.cube_size,
+      self.cube_size,
+      self.cube_size,
+    )  # shape of latent space [C, D, H, W]
     self.n_downsamples = int(
       min(  # choose min downsampling to reach approximate cube size
         log(self.input_frame_hw[0] // self.cube_size, self.downsample_scale),
         log(self.input_frame_hw[1] // self.cube_size, self.downsample_scale),
       )
     )
-    self.padding = (self.kernel_size - 1) // 2  # padding for conv layers to maintain spatial dimensions
+    self.padding = (
+      self.kernel_size - 1
+    ) // 2  # padding for conv layers to maintain spatial dimensions
 
     # final state before encoder's AdaptiveAvgPool3d (depth, H, W)
-    self.pre_pool_shape = (self.num_frames, self.input_frame_hw[0] // self.downsample_scale**self.n_downsamples,
-                           self.input_frame_hw[1] // self.downsample_scale**self.n_downsamples)
+    self.pre_pool_shape = (
+      self.num_frames,
+      self.input_frame_hw[0] // self.downsample_scale**self.n_downsamples,
+      self.input_frame_hw[1] // self.downsample_scale**self.n_downsamples,
+    )
 
 
 @dataclass
@@ -87,12 +99,22 @@ class VVAEGeometricConfig:
   believes it saw that region. It trails density, which the renderer reads last, so renders skip
   it."""
 
-  grid_bounds: tuple[tuple[float, float], ...] = ((-2.0, 2.0), (-1.5, 1.5), (0.0, 4.0))  # metres
-  grid_resolution: tuple[int, int, int] = (32, 24, 32)  # 12.5 cm cubic voxels at that box
+  grid_bounds: tuple[tuple[float, float], ...] = (
+    (-2.0, 2.0),
+    (-1.5, 1.5),
+    (0.0, 4.0),
+  )  # metres
+  grid_resolution: tuple[int, int, int] = (
+    32,
+    24,
+    32,
+  )  # 12.5 cm cubic voxels at that box
   source_fovy_deg: float = 90.0  # camera the frames were taken with
   depth_max: float = 4.0
   render_hw: tuple[int, int] = (160, 160)  # what the decoder renders a query pose into
-  density_bias: float = -6.0  # decoder's initial density, low enough that rays cross the volume
+  density_bias: float = (
+    -6.0
+  )  # decoder's initial density, low enough that rays cross the volume
 
   base_channels: int = 32
   kernel_size: int = 3
@@ -107,7 +129,9 @@ class VVAEGeometricConfig:
   # calculated fields
   in_channels: int = field(init=False)  # rgb plus density, what the lift produces
   density_index: int = field(init=False)  # where density sits, since unknown trails it
-  volume_channels: int = field(init=False)  # appearance plus density, what the decoder produces
+  volume_channels: int = field(
+    init=False
+  )  # appearance plus density, what the decoder produces
   render_channels: int = field(init=False)
   latent_shape: tuple[int, int, int, int] = field(init=False)
   latent_grid: tuple[int, int, int] = field(init=False)
@@ -120,13 +144,17 @@ class VVAEGeometricConfig:
     appearance = {"rgb": 3, "gray_depth": 1, "depth": 0}[self.target]
     self.volume_channels = appearance + 1 + self.predict_unknown
     self.render_channels = appearance + (self.target != "rgb")
-    self.bounds = torch.tensor(self.grid_bounds, dtype=torch.float32).T  # [2, 3], lower then upper
+    self.bounds = torch.tensor(
+      self.grid_bounds, dtype=torch.float32
+    ).T  # [2, 3], lower then upper
     self.padding = (self.kernel_size - 1) // 2
 
     shrink = self.downsample_scale**self.n_downsamples
     if any(size % shrink for size in self.grid_resolution):
-      raise ValueError(f"grid {self.grid_resolution} is not divisible by {shrink}, so the latent "
-                       "would not be a whole number of voxels on every axis")
+      raise ValueError(
+        f"grid {self.grid_resolution} is not divisible by {shrink}, so the latent "
+        "would not be a whole number of voxels on every axis"
+      )
     self.latent_grid = tuple(size // shrink for size in self.grid_resolution)
     self.latent_shape = (self.latent_channels, *self.latent_grid)
 
@@ -139,7 +167,9 @@ class VVAEOutput:
   mu: torch.Tensor  # mean
   logvar: torch.Tensor  # variance
   x_hat: torch.Tensor  # reconstructed frames
-  volume: torch.Tensor | None = None  # the decoded grid, kept so a volume loss need not redecode
+  volume: torch.Tensor | None = (
+    None  # the decoded grid, kept so a volume loss need not redecode
+  )
 
 
 class VVAEBlock(nn.Module):
@@ -153,8 +183,14 @@ class VVAEBlock(nn.Module):
     self.levels = nn.ModuleList()
     for i in range(config.levels_per_block):
       layers = [
-        nn.Conv3d(channel, channel, config.kernel_size, padding=config.padding,
-                  bias=config.norm is None, groups=config.groups),
+        nn.Conv3d(
+          channel,
+          channel,
+          config.kernel_size,
+          padding=config.padding,
+          bias=config.norm is None,
+          groups=config.groups,
+        ),
         config.norm(channel) if config.norm else nn.Identity(),
         self.config.act(),
       ]
@@ -197,17 +233,30 @@ class VVAEEncoder(nn.Module):
     super().__init__()
     self.config = config
 
-    self.conv = nn.Conv3d(config.in_channels, config.base_channels, config.kernel_size,
-                          padding=config.padding, bias=config.norm is None)
+    self.conv = nn.Conv3d(
+      config.in_channels,
+      config.base_channels,
+      config.kernel_size,
+      padding=config.padding,
+      bias=config.norm is None,
+    )
     self.norm = config.norm(config.base_channels) if config.norm else nn.Identity()
 
     channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)]
 
     self.levels = nn.ModuleList(
-      [ nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)]) for ch in channels])
-    
+      [
+        nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)])
+        for ch in channels
+      ]
+    )
+
     self.transitions = nn.ModuleList(
-      [nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)for i in range(len(channels) - 1)])
+      [
+        nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)
+        for i in range(len(channels) - 1)
+      ]
+    )
 
     self.final_pool = nn.AdaptiveAvgPool3d(output_size=config.latent_shape[1:])
     self.channel_proj = nn.Conv3d(channels[-1], 2 * config.latent_channels, 1)
@@ -217,14 +266,19 @@ class VVAEEncoder(nn.Module):
 
     x = self.config.act()(self.norm(self.conv(x)))
     for i in range(len(self.levels)):
-      if (i > 0):  # shrink H, W only, number of frames starts near latent's cube_size already
-        x = F.avg_pool3d(x, (1, self.config.downsample_scale, self.config.downsample_scale))
+      if (
+        i > 0
+      ):  # shrink H, W only, number of frames starts near latent's cube_size already
+        x = F.avg_pool3d(
+          x, (1, self.config.downsample_scale, self.config.downsample_scale)
+        )
         x = self.transitions[i - 1](x)
       x = self.levels[i](x)
     x = self.final_pool(x)
     x = self.channel_proj(x)
     mean, logvar = x.chunk(2, dim=1)  # mean and log variance
     return mean, logvar
+
 
 class VVAEDecoder(nn.Module):
   """Converts a 3d latent back into a set of frames."""
@@ -233,27 +287,47 @@ class VVAEDecoder(nn.Module):
     super().__init__()
     self.config = config
 
-    channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)][::-1]  # reversed from encoder
-    self.channel_proj = nn.Conv3d(config.latent_channels, channels[0], 1)  # for vae (mu, logvar)
+    channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)][
+      ::-1
+    ]  # reversed from encoder
+    self.channel_proj = nn.Conv3d(
+      config.latent_channels, channels[0], 1
+    )  # for vae (mu, logvar)
 
     self.levels = nn.ModuleList(
-      [ nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)]) for ch in channels])
+      [
+        nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)])
+        for ch in channels
+      ]
+    )
 
     self.transitions = nn.ModuleList(
-      [nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)for i in range(len(channels) - 1)])
+      [
+        nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)
+        for i in range(len(channels) - 1)
+      ]
+    )
 
-    self.final_conv = nn.Conv3d(config.base_channels, config.in_channels, config.kernel_size,
-                                padding=config.padding)  # mirror the encoder's first conv's input channel count
+    self.final_conv = nn.Conv3d(
+      config.base_channels,
+      config.in_channels,
+      config.kernel_size,
+      padding=config.padding,
+    )  # mirror the encoder's first conv's input channel count
 
   def forward(self, z):
     x = self.channel_proj(z)
-    x = F.interpolate(x, size=self.config.pre_pool_shape, mode="trilinear", align_corners=False)
+    x = F.interpolate(
+      x, size=self.config.pre_pool_shape, mode="trilinear", align_corners=False
+    )
     for i in range(len(self.levels)):
       x = self.levels[i](x)
       if i < len(self.levels) - 1:  # not last level
         x = F.interpolate(
-          x, scale_factor=(1, self.config.downsample_scale, self.config.downsample_scale),
-          mode="trilinear", align_corners=False,
+          x,
+          scale_factor=(1, self.config.downsample_scale, self.config.downsample_scale),
+          mode="trilinear",
+          align_corners=False,
         )
         x = self.transitions[i](x)
     return self.final_conv(x)
@@ -266,34 +340,63 @@ class VVAEGeometricEncoder(nn.Module):
   def __init__(self, config: VVAEGeometricConfig) -> None:
     super().__init__()
     self.config = config
-    self.conv = nn.Conv3d(config.in_channels, config.base_channels, config.kernel_size,
-                          padding=config.padding, bias=config.norm is None)
+    self.conv = nn.Conv3d(
+      config.in_channels,
+      config.base_channels,
+      config.kernel_size,
+      padding=config.padding,
+      bias=config.norm is None,
+    )
     self.norm = config.norm(config.base_channels) if config.norm else nn.Identity()
 
     channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)]
     self.levels = nn.ModuleList(
-      [nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)]) for ch in channels])
+      [
+        nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)])
+        for ch in channels
+      ]
+    )
     self.transitions = nn.ModuleList(
-      [nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None) for i in range(len(channels) - 1)])
+      [
+        nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)
+        for i in range(len(channels) - 1)
+      ]
+    )
 
     self.channel_proj = nn.Conv3d(channels[-1], 2 * config.latent_channels, 1)
 
   def lift(self, frames: torch.Tensor, poses: torch.Tensor) -> torch.Tensor:
     """[B, 4, T, H, W] rgb+depth and [B, T, 7] relative poses -> [B, 4, X, Y, Z] canonical grids."""
-    return torch.stack([
-      lift_window(f, p, self.config.bounds.to(f), self.config.grid_resolution, self.config.source_fovy_deg,
-                  self.config.depth_max)
-      for f, p in zip(frames, poses, strict=True)
-    ])
+    return torch.stack(
+      [
+        lift_window(
+          f,
+          p,
+          self.config.bounds.to(f),
+          self.config.grid_resolution,
+          self.config.source_fovy_deg,
+          self.config.depth_max,
+        )
+        for f, p in zip(frames, poses, strict=True)
+      ]
+    )
 
   def carve(self, frames: torch.Tensor, poses: torch.Tensor) -> torch.Tensor:
     """[B, 4, T, H, W] and [B, T, 7] -> [B, 2, X, Y, Z] of (occupied, observed). Not part of the
     forward pass: it is supervision, saying which parts of the box any camera actually saw."""
-    return torch.stack([
-      carve_window(f, p, self.config.bounds.to(f), self.config.grid_resolution,
-                   self.config.source_fovy_deg, self.config.depth_max)
-      for f, p in zip(frames, poses, strict=True)
-    ])
+    return torch.stack(
+      [
+        carve_window(
+          f,
+          p,
+          self.config.bounds.to(f),
+          self.config.grid_resolution,
+          self.config.source_fovy_deg,
+          self.config.depth_max,
+        )
+        for f, p in zip(frames, poses, strict=True)
+      ]
+    )
 
   def forward(self, frames: torch.Tensor, poses: torch.Tensor):
     x = self.config.act()(self.norm(self.conv(self.lift(frames, poses))))
@@ -311,13 +414,25 @@ class VVAEGeometricDecoder(nn.Module):
   def __init__(self, config: VVAEGeometricConfig) -> None:
     super().__init__()
     self.config = config
-    channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)][::-1]
+    channels = [config.base_channels * (2**i) for i in range(config.n_downsamples + 1)][
+      ::-1
+    ]
     self.channel_proj = nn.Conv3d(config.latent_channels, channels[0], 1)
     self.levels = nn.ModuleList(
-      [nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)]) for ch in channels])
+      [
+        nn.Sequential(*[VVAEBlock(ch, config) for _ in range(config.blocks_per_level)])
+        for ch in channels
+      ]
+    )
     self.transitions = nn.ModuleList(
-      [nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None) for i in range(len(channels) - 1)])
-    self.final_conv = nn.Conv3d(channels[-1], config.volume_channels, config.kernel_size, padding=config.padding)
+      [
+        nn.Conv3d(channels[i], channels[i + 1], 1, bias=config.norm is None)
+        for i in range(len(channels) - 1)
+      ]
+    )
+    self.final_conv = nn.Conv3d(
+      channels[-1], config.volume_channels, config.kernel_size, padding=config.padding
+    )
     bias = torch.zeros(config.volume_channels)
     bias[-1] = config.density_bias  # start nearly transparent
     self.final_conv.bias = nn.Parameter(bias)
@@ -329,22 +444,39 @@ class VVAEGeometricDecoder(nn.Module):
     for i, blocks in enumerate(self.levels):
       x = blocks(x)
       if i < len(self.levels) - 1:
-        x = F.interpolate(x, scale_factor=self.config.downsample_scale, mode="trilinear",
-                          align_corners=False)
+        x = F.interpolate(
+          x,
+          scale_factor=self.config.downsample_scale,
+          mode="trilinear",
+          align_corners=False,
+        )
         x = self.transitions[i](x)
-    return self.final_conv(x).sigmoid()  # sigmoid not clamp, so gradients survive saturation
+    return self.final_conv(
+      x
+    ).sigmoid()  # sigmoid not clamp, so gradients survive saturation
 
   def forward(self, z: torch.Tensor, pose: torch.Tensor):
     """Renders each latent from its query pose, returning the [B, render_channels, H, W] image and
     the decoded grid it came from."""
     config = self.config
     volume = self.volume(z)
-    renderable = volume[:, :-1] if config.predict_unknown else volume  # density has to be last
-    return torch.stack([
-      render_view(v, p, config.bounds.to(v), config.render_hw, config.source_fovy_deg,
-                  depth_max=config.depth_max, include_depth=config.target != "rgb")
-      for v, p in zip(renderable, pose, strict=True)
-    ]), volume
+    renderable = (
+      volume[:, :-1] if config.predict_unknown else volume
+    )  # density has to be last
+    return torch.stack(
+      [
+        render_view(
+          v,
+          p,
+          config.bounds.to(v),
+          config.render_hw,
+          config.source_fovy_deg,
+          depth_max=config.depth_max,
+          include_depth=config.target != "rgb",
+        )
+        for v, p in zip(renderable, pose, strict=True)
+      ]
+    ), volume
 
 
 class VVAEGeometric(nn.Module):
@@ -362,7 +494,9 @@ class VVAEGeometric(nn.Module):
     rather than showing up as a model that will not converge."""
     return self.config.render_hw, self.config.source_fovy_deg, self.config.depth_max
 
-  def forward(self, frames: torch.Tensor, poses: torch.Tensor, query: torch.Tensor) -> VVAEOutput:
+  def forward(
+    self, frames: torch.Tensor, poses: torch.Tensor, query: torch.Tensor
+  ) -> VVAEOutput:
     mu, logvar = self.encoder(frames, poses)
     z_hat = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
     x_hat, volume = self.decoder(z_hat, query)

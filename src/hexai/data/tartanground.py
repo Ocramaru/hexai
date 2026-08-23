@@ -21,18 +21,23 @@ Sample = torch.Tensor | tuple[torch.Tensor, torch.Tensor]  # frames, or (frames,
 # OpenCV's own internal threading can deadlock against multiple simultaneous
 cv2.setNumThreads(0)
 
+
 # TartanGround's per-file depth is stored as an 8-bit RGBA PNG whose 4 raw
 # bytes per pixel ARE an IEEE-754 float32 (little-endian)
-def _read_depth_meters(path: Path, image_hw: tuple[int, int] | None = None) -> np.ndarray:
+def _read_depth_meters(
+  path: Path, image_hw: tuple[int, int] | None = None
+) -> np.ndarray:
   depth_rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
   if depth_rgba is None:
     raise FileNotFoundError(f"could not read depth file: {path}")
   depth = depth_rgba.view("<f4").squeeze(-1)
   if image_hw is not None:
-      depth = cv2.resize(depth, image_hw[::-1], interpolation=cv2.INTER_NEAREST)
+    depth = cv2.resize(depth, image_hw[::-1], interpolation=cv2.INTER_NEAREST)
   return depth
 
+
 _INV_255 = np.float32(1.0 / 255.0)
+
 
 def _read_rgb(path: Path, image_hw: tuple[int, int] | None = None) -> np.ndarray:
   """RGB in [0, 1], cast+scaled in one fused pass rather than
@@ -54,8 +59,14 @@ def _read_poses(trajectory_path: Path, camera_name: str) -> np.ndarray:
   return np.loadtxt(pose_path, dtype=np.float32)
 
 
-def _rotate_view(rgb: np.ndarray, depth: np.ndarray, source_k_inv: np.ndarray,
-                 out_k_inv: np.ndarray, rotation: np.ndarray, out_hw: tuple[int, int]):
+def _rotate_view(
+  rgb: np.ndarray,
+  depth: np.ndarray,
+  source_k_inv: np.ndarray,
+  out_k_inv: np.ndarray,
+  rotation: np.ndarray,
+  out_hw: tuple[int, int],
+):
   """Re-renders a frame as a camera rotated about its own optical centre, which is what the
   pan/tilt head does. Rotating about the centre has no parallax so a homography is exact, but
   depth measures along the optical axis and that axis moved, so it rescales by the ray's z."""
@@ -98,11 +109,16 @@ def _relative_poses(poses: np.ndarray) -> np.ndarray:
 
   translation = anchor_inv.apply(poses[:, :3] - poses[anchor, :3]) @ _NED2CAM.T
   rotation = (basis * (anchor_inv * rot) * basis.inv()).as_quat()
-  return np.concatenate([translation, rotation[:, [3, 0, 1, 2]]], axis=1).astype(np.float32)
+  return np.concatenate([translation, rotation[:, [3, 0, 1, 2]]], axis=1).astype(
+    np.float32
+  )
 
 
 def split_context_target(
-  frames: torch.Tensor, poses: torch.Tensor, target: int | None = None, mode: str = "rgb"
+  frames: torch.Tensor,
+  poses: torch.Tensor,
+  target: int | None = None,
+  mode: str = "rgb",
 ):
   """Holds one frame out of a [B, 4, T, H, W] window so the decoder has to render a view the encoder
   never saw, which is what stops the latent storing a view instead of a scene. Returns the context
@@ -118,8 +134,12 @@ def split_context_target(
   choices = [t for t in range(count) if t != anchor]
   target = choices[int(torch.randint(len(choices), (1,)))] if target is None else target
   context = [t for t in range(count) if t != target]
-  return (frames[:, :, context], poses[:, context],
-          target_view(frames[:, :, target], mode), poses[:, target])
+  return (
+    frames[:, :, context],
+    poses[:, context],
+    target_view(frames[:, :, target], mode),
+    poses[:, target],
+  )
 
 
 _LUMA = (0.299, 0.587, 0.114)
@@ -155,16 +175,22 @@ def add_pose_noise(
 
     n = len(step_t)
     step_t = step_t + (
-      torch.randn(n, 3).numpy() * translation_frac * np.linalg.norm(step_t, axis=1, keepdims=True)
+      torch.randn(n, 3).numpy()
+      * translation_frac
+      * np.linalg.norm(step_t, axis=1, keepdims=True)
     )
-    step_rot = step_rot * Rotation.from_rotvec(torch.randn(n, 3).numpy() * np.radians(rotation_deg))
+    step_rot = step_rot * Rotation.from_rotvec(
+      torch.randn(n, 3).numpy() * np.radians(rotation_deg)
+    )
 
     walk_t, walk_rot = [np.zeros(3)], [Rotation.identity()]
     for i in range(n):
       walk_t.append(walk_t[-1] + walk_rot[-1].apply(step_t[i]))
       walk_rot.append(walk_rot[-1] * step_rot[i])
     out[b, :, :3] = torch.from_numpy(np.stack(walk_t).astype(np.float32))
-    out[b, :, 3:] = torch.from_numpy(np.stack([r.as_quat() for r in walk_rot]).astype(np.float32))
+    out[b, :, 3:] = torch.from_numpy(
+      np.stack([r.as_quat() for r in walk_rot]).astype(np.float32)
+    )
   return out
 
 
@@ -204,10 +230,18 @@ class TartanGroundWindowDataset(Dataset[Sample]):
   """Meters. Values above this are clipped."""
   image_hw: tuple[int, int] | None = None  # if None will use default size
   include_debug_image: bool = False  # plot the first frame on construction
-  include_pose: bool = False  # also return [T, 7] poses relative to the window's first frame
-  source_fovy_deg: float = 90.0  # cube faces are 90 by definition, confirmed by warp consistency
-  head_fovy_deg: float | None = None  # re-render at this fovy, None keeps the source camera
-  include_head_jitter: bool = False  # aim each frame randomly rather than straight ahead
+  include_pose: bool = (
+    False  # also return [T, 7] poses relative to the window's first frame
+  )
+  source_fovy_deg: float = (
+    90.0  # cube faces are 90 by definition, confirmed by warp consistency
+  )
+  head_fovy_deg: float | None = (
+    None  # re-render at this fovy, None keeps the source camera
+  )
+  include_head_jitter: bool = (
+    False  # aim each frame randomly rather than straight ahead
+  )
 
   _image_hw: tuple[int, int] = field(init=False)
   _source_hw: tuple[int, int] = field(init=False)
@@ -217,7 +251,9 @@ class TartanGroundWindowDataset(Dataset[Sample]):
 
   def __post_init__(self) -> None:
     self._windows: list[list[tuple[Path, Path]]] = []
-    self._window_trajectory: list[Path] = []  # which trajectory_path each window came from
+    self._window_trajectory: list[
+      Path
+    ] = []  # which trajectory_path each window came from
     self._window_camera: list[str] = []  # and which camera
     self._window_poses: list[np.ndarray] = []
     skipped: list[str] = []
@@ -227,25 +263,41 @@ class TartanGroundWindowDataset(Dataset[Sample]):
         # there yet rather than failing the whole dataset
         try:
           pairs = _frame_pairs(trajectory_path, camera_name)
-          poses = _read_poses(trajectory_path, camera_name) if self.include_pose else None
+          poses = (
+            _read_poses(trajectory_path, camera_name) if self.include_pose else None
+          )
         except FileNotFoundError:
+          pairs = []
+          poses = None
+        # an interrupted download leaves the directory made and empty as often as absent
+        if not pairs:
           skipped.append(f"{trajectory_path.parent.parent.name}/{trajectory_path.name}")
           continue
         if poses is not None and len(poses) != len(pairs):
-          raise ValueError(f"{len(poses)} poses for {len(pairs)} frames in {trajectory_path}")
+          raise ValueError(
+            f"{len(poses)} poses for {len(pairs)} frames in {trajectory_path}"
+          )
 
-        for start in range(0, len(pairs) - self.num_frames + 1, self.stride or self.num_frames):
+        for start in range(
+          0, len(pairs) - self.num_frames + 1, self.stride or self.num_frames
+        ):
           self._windows.append(pairs[start : start + self.num_frames])
           self._window_trajectory.append(trajectory_path)
           self._window_camera.append(camera_name)
           if poses is not None:
-            self._window_poses.append(_relative_poses(poses[start : start + self.num_frames]))
+            self._window_poses.append(
+              _relative_poses(poses[start : start + self.num_frames])
+            )
 
     if skipped:
-      print(f"skipping {len(skipped)} incomplete trajectories: {', '.join(sorted(set(skipped))[:4])}"
-            f"{' ...' if len(skipped) > 4 else ''}")
+      print(
+        f"skipping {len(skipped)} incomplete trajectories: {', '.join(sorted(set(skipped))[:4])}"
+        f"{' ...' if len(skipped) > 4 else ''}"
+      )
     if not self._windows:
-      raise FileNotFoundError(f"no complete trajectories under {self.trajectory_paths[:1]}")
+      raise FileNotFoundError(
+        f"no complete trajectories under {self.trajectory_paths[:1]}"
+      )
     first_image = cv2.imread(str(self._windows[0][0][0]), cv2.IMREAD_COLOR)
     if first_image is None:
       raise FileNotFoundError(self._windows[0][0][0])
@@ -259,15 +311,20 @@ class TartanGroundWindowDataset(Dataset[Sample]):
       aspect = np.array([self._image_hw[1] / self._image_hw[0], 1.0])
       half = lambda fovy: np.arctan(aspect * np.tan(np.radians(fovy) / 2))  # noqa: E731
       self._head_range_deg = tuple(
-        np.degrees(np.maximum(half(self.source_fovy_deg) - half(self.head_fovy_deg), 0.0))
+        np.degrees(
+          np.maximum(half(self.source_fovy_deg) - half(self.head_fovy_deg), 0.0)
+        )
       )
 
-    self._source_k_inv = pixel_to_camera_ray(self._source_hw, self.source_fovy_deg).numpy()
+    self._source_k_inv = pixel_to_camera_ray(
+      self._source_hw, self.source_fovy_deg
+    ).numpy()
     self._out_k_inv = pixel_to_camera_ray(
       self._image_hw, self.head_fovy_deg or self.source_fovy_deg
     ).numpy()
 
-    if self.include_debug_image: self._show_debug_image()
+    if self.include_debug_image:
+      self._show_debug_image()
 
   @property
   def camera(self) -> tuple[tuple[int, int], float, float]:
@@ -281,14 +338,16 @@ class TartanGroundWindowDataset(Dataset[Sample]):
     import matplotlib.pyplot as plt
 
     sample = self[0]
-    if isinstance(sample, tuple): sample = sample[0]
+    if isinstance(sample, tuple):
+      sample = sample[0]
     fig, (ax_rgb, ax_depth) = plt.subplots(1, 2, figsize=(8, 4))
     ax_rgb.imshow(sample[:3, 0].permute(1, 2, 0).numpy())
     ax_rgb.set_title(f"rgb {tuple(sample.shape[2:])}")
     depth = ax_depth.imshow(sample[3, 0].numpy(), cmap="viridis", vmin=0, vmax=1)
     ax_depth.set_title(f"depth, clipped at {self.depth_max} m")
     fig.colorbar(depth, ax=ax_depth)
-    for ax in (ax_rgb, ax_depth): ax.axis("off")
+    for ax in (ax_rgb, ax_depth):
+      ax.axis("off")
     fig.suptitle(f"{self._window_trajectory[0].name} {self._window_camera[0]}")
 
   def __len__(self) -> int:
@@ -303,8 +362,14 @@ class TartanGroundWindowDataset(Dataset[Sample]):
     this dataset, so `__getitem__` still does the actual loading. Either argument
     takes one value or many, and `None` means all of them. Windows come out in
     this dataset's order, not the order asked for."""
-    trajectory_paths = self.trajectory_paths if trajectory_paths is None else trajectory_paths
-    paths = {trajectory_paths} if isinstance(trajectory_paths, Path) else set(trajectory_paths)
+    trajectory_paths = (
+      self.trajectory_paths if trajectory_paths is None else trajectory_paths
+    )
+    paths = (
+      {trajectory_paths}
+      if isinstance(trajectory_paths, Path)
+      else set(trajectory_paths)
+    )
     camera_names = self.camera_names if camera_names is None else camera_names
     cameras = {camera_names} if isinstance(camera_names, str) else set(camera_names)
 
@@ -314,7 +379,9 @@ class TartanGroundWindowDataset(Dataset[Sample]):
       raise ValueError(f"dataset has no cameras: {sorted(missing)}")
     indices = [
       i
-      for i, (p, c) in enumerate(zip(self._window_trajectory, self._window_camera, strict=True))
+      for i, (p, c) in enumerate(
+        zip(self._window_trajectory, self._window_camera, strict=True)
+      )
       if p in paths and c in cameras
     ]
     if not indices:
@@ -339,14 +406,24 @@ class TartanGroundWindowDataset(Dataset[Sample]):
     # Write each frame directly into its slice of the final [4, T, H, W]
     out = np.empty((4, len(window), *self._image_hw), dtype=np.float32)
     for t, (image_path, depth_path) in enumerate(window):
-      read_hw = None if self.head_fovy_deg else self._image_hw  # re-rendering wants the source
+      read_hw = (
+        None if self.head_fovy_deg else self._image_hw
+      )  # re-rendering wants the source
       rgb = _read_rgb(image_path, read_hw)
       depth = _read_depth_meters(depth_path, read_hw)  # [H, W], meters
       if self.head_fovy_deg:
-        rgb, depth = _rotate_view(rgb, depth, self._source_k_inv, self._out_k_inv,
-                                  heads[t].as_matrix(), self._image_hw)
+        rgb, depth = _rotate_view(
+          rgb,
+          depth,
+          self._source_k_inv,
+          self._out_k_inv,
+          heads[t].as_matrix(),
+          self._image_hw,
+        )
       out[:3, t] = rgb.transpose(2, 0, 1)
-      np.clip(depth, 0.0, self.depth_max, out=out[3, t])  # write clipped depth straight into out
+      np.clip(
+        depth, 0.0, self.depth_max, out=out[3, t]
+      )  # write clipped depth straight into out
       out[3, t] /= self.depth_max  # in-place scale, no extra allocation
 
     if not self.include_pose:
@@ -390,7 +467,9 @@ class TartanGroundSubset(Subset[Sample]):
     keep = set(self.indices)
     narrowed = self.dataset.get_trajectory(trajectory_paths, camera_names)
     if not (indices := [i for i in narrowed.indices if i in keep]):
-      raise ValueError(f"nothing in this subset for {trajectory_paths} x {camera_names}")
+      raise ValueError(
+        f"nothing in this subset for {trajectory_paths} x {camera_names}"
+      )
     return TartanGroundSubset(self.dataset, indices)
 
 
@@ -435,7 +514,9 @@ def make_dataloader(
   live session (or one interrupted mid-epoch) orphans them -- pass it from a
   training loop that runs to completion, not from interactive code."""
   return DataLoader(
-    dataset, batch_size=batch_size, num_workers=num_workers,
+    dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
     persistent_workers=persistent_workers and num_workers > 0,
     prefetch_factor=2 if num_workers > 0 else None,
     **kwargs,
@@ -452,8 +533,13 @@ class EnvironmentSampler(Sampler[int]):
   the way it will on the robot.
   """
 
-  def __init__(self, subset: TartanGroundSubset, envs_per_epoch: int,
-               samples_per_epoch: int | None = None, seed: int = 0):
+  def __init__(
+    self,
+    subset: TartanGroundSubset,
+    envs_per_epoch: int,
+    samples_per_epoch: int | None = None,
+    seed: int = 0,
+  ):
     self.by_env: dict[str, list[int]] = {}
     for position, index in enumerate(subset.indices):
       env = environment_of(subset.dataset.window_trajectory(index))
@@ -461,7 +547,9 @@ class EnvironmentSampler(Sampler[int]):
     self.envs_per_epoch = min(envs_per_epoch, len(self.by_env))
     self.generator = torch.Generator().manual_seed(seed)
     # a fixed count regardless of which environments come up, so every epoch is the same size
-    self.samples = samples_per_epoch or round(len(subset) * self.envs_per_epoch / len(self.by_env))
+    self.samples = samples_per_epoch or round(
+      len(subset) * self.envs_per_epoch / len(self.by_env)
+    )
 
   def __len__(self) -> int:
     return self.samples
@@ -470,8 +558,11 @@ class EnvironmentSampler(Sampler[int]):
     names = list(self.by_env)
     picked = torch.randperm(len(names), generator=self.generator)[: self.envs_per_epoch]
     pool = [i for p in picked for i in self.by_env[names[int(p)]]]
-    draw = torch.randint(len(pool), (self.samples,), generator=self.generator) \
-      if self.samples > len(pool) else torch.randperm(len(pool), generator=self.generator)[: self.samples]
+    draw = (
+      torch.randint(len(pool), (self.samples,), generator=self.generator)
+      if self.samples > len(pool)
+      else torch.randperm(len(pool), generator=self.generator)[: self.samples]
+    )
     return (pool[int(i)] for i in draw)
 
 
@@ -503,6 +594,11 @@ class TartanGroundConfig:
   batch_size: int = 4
   num_workers: int = 6
   envs_per_epoch: int | None = None  # None uses every environment each epoch
+  samples_per_epoch: int | None = None  # None scales the epoch with envs_per_epoch
+
+  def __post_init__(self) -> None:
+    # a config read from json gives root as a str, and every use of it here is a Path
+    object.__setattr__(self, "root", Path(self.root))
 
   @property
   def camera(self) -> tuple[tuple[int, int], float, float]:
@@ -512,7 +608,9 @@ class TartanGroundConfig:
 
   def trajectories(self) -> list[Path]:
     if self.envs:
-      return [t for e in self.envs for t in find_trajectory_dirs(self.root / e, self.version)]
+      return [
+        t for e in self.envs for t in find_trajectory_dirs(self.root / e, self.version)
+      ]
     return find_trajectory_dirs(self.root, self.version)
 
   def dataset(self) -> "TartanGroundWindowDataset":
@@ -532,12 +630,16 @@ class TartanGroundConfig:
   def build(self) -> tuple[TartanGroundSubset, TartanGroundSubset, str]:
     """(train, val, what was held out)."""
     ds = self.dataset()
-    have = ds.loaded_trajectories  # not what was asked for, if a download is still running
+    have = (
+      ds.loaded_trajectories
+    )  # not what was asked for, if a download is still running
     envs = sorted({environment_of(t) for t in have})
     if len(envs) > 1:
       held = self.val_env or envs[-1]
       if held not in envs:
-        raise ValueError(f"val_env {held!r} is not among the environments present: {envs}")
+        raise ValueError(
+          f"val_env {held!r} is not among the environments present: {envs}"
+        )
       val = [t for t in have if environment_of(t) == held]
       train = [t for t in have if environment_of(t) != held]
     else:
@@ -553,13 +655,16 @@ class TartanGroundConfig:
       s, batch_size=self.batch_size, num_workers=self.num_workers, **kw
     )
     if self.envs_per_epoch:
-      sampler = EnvironmentSampler(train, self.envs_per_epoch)
+      sampler = EnvironmentSampler(train, self.envs_per_epoch, self.samples_per_epoch)
       train_loader = make(train, sampler=sampler)
       note = f", {sampler.samples} of them an epoch from {sampler.envs_per_epoch} environments"
     else:
       train_loader, note = make(train, shuffle=True), ""
-    return (train_loader, make(val, shuffle=True),
-            f"{len(train)} train / {len(val)} val windows, holding out {held}{note}")
+    return (
+      train_loader,
+      make(val, shuffle=True),
+      f"{len(train)} train / {len(val)} val windows, holding out {held}{note}",
+    )
 
 
 def combine(*configs: TartanGroundConfig) -> tuple[DataLoader, DataLoader, str]:
@@ -587,4 +692,8 @@ def combine(*configs: TartanGroundConfig) -> tuple[DataLoader, DataLoader, str]:
     s, batch_size=first.batch_size, shuffle=True, num_workers=first.num_workers
   )
   assert val is not None
-  return make(train), make(val), f"{len(train)} train / {len(val)} val windows, holding out {held}"
+  return (
+    make(train),
+    make(val),
+    f"{len(train)} train / {len(val)} val windows, holding out {held}",
+  )

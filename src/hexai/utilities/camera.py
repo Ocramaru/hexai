@@ -15,4 +15,6 @@ def pixel_to_camera_ray(image_hw: tuple[int, int], fovy_deg: float) -> torch.Ten
   image centre, so an off-centre crop would need its own."""
   h, w = image_hw
   f = (h / 2) / torch.tan(torch.tensor(fovy_deg).deg2rad() / 2)
-  return torch.linalg.inv(torch.tensor([[f, 0.0, w / 2], [0.0, f, h / 2], [0.0, 0.0, 1.0]]))
+  return torch.linalg.inv(
+    torch.tensor([[f, 0.0, w / 2], [0.0, f, h / 2], [0.0, 0.0, 1.0]])
+  )

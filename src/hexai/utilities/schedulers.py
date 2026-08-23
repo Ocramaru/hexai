@@ -18,9 +18,22 @@ class AdaptiveRestarts:
   assumes lower is better.
   """
 
-  def __init__(self, optimizer, lr, horizon, shape="cosine", patience=2, ceiling_decay=0.6,
-               smoothing=0.35, metric_ema=0.5, threshold=0.005, probe=3, warmup=3, div=25.0,
-               floor=1e-6):
+  def __init__(
+    self,
+    optimizer,
+    lr,
+    horizon,
+    shape="cosine",
+    patience=2,
+    ceiling_decay=0.6,
+    smoothing=0.35,
+    metric_ema=0.5,
+    threshold=0.005,
+    probe=3,
+    warmup=3,
+    div=25.0,
+    floor=1e-6,
+  ):
     self.opt, self.peak, self.horizon, self.shape = optimizer, lr, horizon, shape
     self.patience, self.ceiling_decay, self.floor = patience, ceiling_decay, floor
     self.smoothing, self.metric_ema = smoothing, metric_ema
@@ -44,7 +57,9 @@ class AdaptiveRestarts:
     """Where this epoch sits in the current segment, a segment running from the last restart to the
     end of training. Later restarts therefore anneal faster, having less run left to spend."""
     span = max(self.horizon - self.segment_start, 1)
-    return decay_at(self.shape, (self.epoch - self.segment_start) / span, self.peak, self.floor)
+    return decay_at(
+      self.shape, (self.epoch - self.segment_start) / span, self.peak, self.floor
+    )
 
   def state_dict(self):
     """Everything needed to carry on mid-slope: where the ceiling has been driven to, how stale the
@@ -59,14 +74,21 @@ class AdaptiveRestarts:
     """Stop pushing the rate back up and run it down to the floor. Until this is called the
     schedule deliberately never finishes, so a run can be extended."""
     self.tapering = True
-    self.target = self.current  # they lag each other, so run down from where we actually are
+    self.target = (
+      self.current
+    )  # they lag each other, so run down from where we actually are
     if over:
-      self.taper_decay = (self.floor / max(self.current, self.floor)) ** (1 / max(over, 1))
+      self.taper_decay = (self.floor / max(self.current, self.floor)) ** (
+        1 / max(over, 1)
+      )
 
   def step(self, metric):
     self.epoch += 1
-    self.smoothed = metric if self.smoothed is None else (
-      (1 - self.metric_ema) * self.smoothed + self.metric_ema * metric)
+    self.smoothed = (
+      metric
+      if self.smoothed is None
+      else ((1 - self.metric_ema) * self.smoothed + self.metric_ema * metric)
+    )
     m = self.smoothed
 
     if self.tapering:
@@ -78,7 +100,9 @@ class AdaptiveRestarts:
       # linear climb to the peak; the adaptive logic only starts after
       frac = self.epoch / self.warmup
       self.best = min(self.best, m)
-      self.target = self.current = self.peak * (1 / self.div + frac * (1 - 1 / self.div))
+      self.target = self.current = self.peak * (
+        1 / self.div + frac * (1 - 1 / self.div)
+      )
       self.segment_start = self.epoch  # the anneal starts where warmup ends
       return self._set(self.current)
 
@@ -93,7 +117,9 @@ class AdaptiveRestarts:
       self.current += self.smoothing * (self.target - self.current)
       return self._set(self.current)
 
-    if m < self.best * (1 - self.threshold):  # a gain has to be worth something to count
+    if m < self.best * (
+      1 - self.threshold
+    ):  # a gain has to be worth something to count
       self.best, self.stale = m, 0
     else:
       self.best, self.stale = min(self.best, m), self.stale + 1
