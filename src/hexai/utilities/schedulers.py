@@ -3,7 +3,7 @@
 Author: Marco Cassar (@Ocramaru)
 """
 
-from hexai.models.utilities.decay import decay_at
+from hexai.utilities.decay import decay_at
 
 
 class AdaptiveRestarts:

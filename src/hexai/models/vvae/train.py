@@ -33,9 +33,7 @@ import wandb
 from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_angle_axis, quat_mul
 from tqdm import tqdm as _tqdm
 
-from hexai.models.utilities import AdaptiveRestarts
-from hexai.models.vvae import VVAEGeometric, VVAEGeometricConfig
-from hexai.models.vvae.data import (
+from hexai.data import (
     TartanGroundWindowDataset,
     add_pose_noise,
     find_trajectory_dirs,
@@ -43,7 +41,9 @@ from hexai.models.vvae.data import (
     split_context_target,
     target_view,
 )
-from hexai.models.vvae.geometry import pixel_to_camera_ray
+from hexai.models.vvae import VVAEGeometric, VVAEGeometricConfig
+from hexai.utilities import AdaptiveRestarts
+from hexai.utilities.camera import pixel_to_camera_ray
 
 ROOT = Path(__file__).resolve().parents[4]
 HOUSE = Path(os.environ.get("TARTAN_ROOT", ROOT / "data/tartanground")) / "House/Data_omni"

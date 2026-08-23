@@ -14,7 +14,7 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from hexai.models.vvae.geometry import pixel_to_camera_ray
+from hexai.utilities.camera import pixel_to_camera_ray
 
 Sample = torch.Tensor | tuple[torch.Tensor, torch.Tensor]  # frames, or (frames, poses)
 

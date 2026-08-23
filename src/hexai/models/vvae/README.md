@@ -58,7 +58,6 @@ uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20 --
 ## Layout
 
 ```
-geometry.py   lift, carve, render, camera intrinsics
 model.py      VVAE (frame stack) and VVAEGeometric (this one)
 data.py       TartanGround windows, context/target split, pose noise
 train.py      training loop, metrics, figures
