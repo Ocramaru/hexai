@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{ "type": "command", "command": ".claude/hooks/agents-context.sh" }]
+      }
+    ],
+    "PostCompact": [
+      { "hooks": [{ "type": "command", "command": ".claude/hooks/agents-forget.sh" }] }
+    ]
+  },
+  "permissions": {
+    "allow": ["Bash(uv run:*)", "Bash(uv sync:*)", "Bash(uv add:*)", "Bash(git:*)", "Bash(gh:*)"]
+  }
+}
