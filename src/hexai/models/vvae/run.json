@@ -1,15 +1,4 @@
-{
-  "jitter": 1,
-  "unknown": 1,
-  "envs_per_epoch": 5,
-  "scheduler": "adaptive",
-  "lr": 0.003,
-  "beta": 0.0001,
-  "target": "depth",
-  "num_frames": 7,
-  "base_channels": 32,
-  "groups": 4,
-  "batch_size": 4,
-  "epochs": 160,
-  "stride": 1
-}
+{"jitter": 1, "unknown": 1, "target": "depth", "num_frames": 7, "stride": 1,
+ "base_channels": 32, "groups": 4, "batch_size": 4,
+ "scheduler": "adaptive", "lr": 0.003, "beta": 0.0001,
+ "epochs": 40, "envs_per_epoch": 5, "samples_per_epoch": 3500}
