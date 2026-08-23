@@ -449,9 +449,8 @@ class TartanGroundConfig:
 
   @property
   def camera(self) -> tuple[tuple[int, int], float, float]:
-    """What a model has to be built with to match this data. Compare against the model's own
-    `camera`: only image_hw mismatches loudly, the other two agree on shape and quietly place
-    every point at the wrong angle or distance."""
+    """What a model must be built with to match this data. Only image_hw mismatches loudly; the
+    other two agree on shape and quietly place every point wrong."""
     return self.image_hw, self.head_fovy_deg or self.source_fovy_deg, self.depth_max
 
   def trajectories(self) -> list[Path]:
@@ -490,10 +489,7 @@ class TartanGroundConfig:
 
   def loaders(self) -> tuple[DataLoader, DataLoader, str]:
     """(train, val, a line describing the split). Both shuffled: at stride 1 an unshuffled batch
-    is near-identical windows, which any across-batch metric reads as the model collapsing.
-
-    The description carries the sizes because a DataLoader does not expose them in a way a type
-    checker accepts, and every caller wants to print them."""
+    is near-identical windows, which any across-batch metric reads as the model collapsing."""
     train, val, held = self.build()
     make = lambda s: make_dataloader(  # noqa: E731
       s, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers
@@ -502,14 +498,11 @@ class TartanGroundConfig:
 
 
 def combine(*configs: TartanGroundConfig) -> tuple[DataLoader, DataLoader, str]:
-  """Train on several configs at once, each contributing its own windows.
+  """Train on several configs at once, for when one source wants a different recipe from another.
+  A list of environments belongs in one config; this is for differing window length or jitter.
 
-  Useful when one source should be cut differently from another -- a wider window here, head
-  jitter there -- since a single config applies one recipe to everything. Validation still comes
-  from one config, the first, so the held-out set stays a single clean thing rather than a blend.
-
-  Every config must agree on `camera`; a model is built for exactly one, and a mismatch places
-  points at the wrong angle without failing.
+  Validation comes from the first config, so the held-out set stays one clean thing. All must
+  agree on `camera`, since a model is built for exactly one.
   """
   if not configs:
     raise ValueError("combine() needs at least one config")

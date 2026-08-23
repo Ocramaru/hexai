@@ -24,6 +24,11 @@ where the work actually happens.
 
 ## Housekeeping
 
+- [ ] The dataset is lazy -- it indexes paths and reads images per sample -- but the index is
+      2.1 KB per window, mostly `Path` objects, 14 per window. That is 4.5 MB for one environment
+      and ~330 MB for all 73, and every dataloader worker forks a copy. If that bites, store a
+      trajectory id plus frame offset and rebuild paths on read.
+
 - [ ] `mujoco.MjSpec` has no stub, so pyright reports it in `assets/hexapod`. Downgraded to a
       warning; mjlab solves it by generating stubs (`typings/generate_mujoco_stubs.sh`) if it ever
       becomes worth doing here.

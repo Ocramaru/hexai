@@ -481,7 +481,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--image_size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=1)  # 1 overlaps windows, 5 does not
-    parser.add_argument("--env")  # one environment, or all of TARTAN_ROOT if unset
+    parser.add_argument("--envs")  # comma separated; all of TARTAN_ROOT if unset
     parser.add_argument("--val_env")  # which environment to hold out
     parser.add_argument("--num_frames", type=int, default=7)
     parser.add_argument("--jitter", type=int, default=1)  # see JITTER_FOVY, and implies masking
@@ -496,7 +496,8 @@ def main():
 
     hw = (args.image_size, args.image_size)
     data = TartanGroundConfig(
-        root=TARTAN / args.env if args.env else TARTAN,
+        root=TARTAN,
+        envs=tuple(args.envs.split(",")) if args.envs else None,
         val_env=args.val_env,
         num_frames=args.num_frames,
         stride=args.stride,
