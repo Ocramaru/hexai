@@ -19,6 +19,27 @@ uv run python -m hexai.models.vvae.train --help
 Training data is [TartanGround](https://tartanair.org/). Point `TARTAN_ROOT` at it, or place it at
 `./data/tartanground`.
 
+## Tracking
+
+Runs log to [wandb](https://wandb.ai). Set `WANDB_MODE=offline` to keep them local, or
+`WANDB_MODE=disabled` to skip it.
+
+Every run carries a glossary of its metrics in the run notes, since wandb has no per-metric
+description. Each also logs a few fixed scenes as images — truth against render across a yaw pan,
+and the volume top-down — chosen by index so they are the same windows in every run and comparable
+across a sweep.
+
+Sweeps are defined beside the model they train, for example `src/hexai/models/vvae/sweep.json`:
+
+```bash
+uv run wandb sweep src/hexai/models/vvae/sweep.json
+wandb agent <entity>/<project>/<sweep_id>
+```
+
+Checkpoints land in a gitignored `.runs/` beside the model, named after whatever the sweep varies,
+and carry optimizer and scheduler state so `--resume` continues a schedule mid-slope rather than
+restarting it.
+
 ## Layout
 
 | | |
