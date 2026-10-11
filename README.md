@@ -13,7 +13,7 @@ comes from PyPI, so nothing needs checking out alongside.
 
 ```bash
 uv sync
-uv run python -m hexai.models.vvae.train --help
+uv run python -m hexai.models.vvae.run --help
 ```
 
 Training data is [TartanGround](https://tartanair.org/). Point `TARTAN_ROOT` at it, or place it at
@@ -44,9 +44,14 @@ uv run wandb sweep src/hexai/models/vvae/sweep.json
 wandb agent <entity>/<project>/<sweep_id>
 ```
 
-Checkpoints land in a gitignored `.runs/` beside the model, named after whatever the sweep varies,
-and carry optimizer and scheduler state so `--resume` continues a schedule mid-slope rather than
-restarting it.
+Checkpoints land in a gitignored `.runs/`, named after the run — wandb's own `fanciful-sunset-12`
+rather than a string of the flags, which only stays unique until someone adds a parameter and
+forgets to list it. What the run *was* is written beside it as `<name>.json`, so
+`grep -l '"occlusion": 1000' .runs/*.json` finds it. `--name` sets one by hand.
+
+Checkpoints carry optimizer and scheduler state, so `--resume` continues a schedule mid-slope
+rather than restarting it, and a continuation keeps the name of the run it continues so its
+snapshots stay together.
 
 ## Layout
 

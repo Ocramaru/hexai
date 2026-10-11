@@ -3,46 +3,28 @@
 Author: Marco Cassar (@Ocramaru)
 """
 
-from hexai.utilities.decay import decay_at
+from hexai.utilities.decay import Decay, decay_at
 
 
-class AdaptiveRestarts:
-  """Anneal while the metric improves, push the rate back up when it stalls, lower the ceiling when
-  a push does not pay off. Four things keep it from thrashing: an average on the metric so a noisy
-  epoch cannot trigger a restart, an average on the rate so a push ramps rather than snaps, a
-  threshold so a trivial gain does not count as progress, and a probe window so a push is judged on
-  its best few epochs rather than its first.
+class PeriodicRestarts:
+  """Cycles that anneal to the floor and start again from a lower ceiling.
 
-  Unlike a fixed schedule it never finishes on its own, holding rate in reserve so a run can be
-  extended. Call `taper()` to anneal out. Stepped on a validation metric, once per epoch, and
-  assumes lower is better.
-  """
+  A cycle is a fixed span of epochs rather than a fraction of the run, so extending a run adds
+  cycles instead of reshaping the ones already spent, and nothing here reads a metric. What a
+  metric-driven version cost is in the VVAE's .agents/learned.md."""
 
-  def __init__(
-    self,
-    optimizer,
-    lr,
-    horizon,
-    shape="cosine",
-    patience=2,
-    ceiling_decay=0.6,
-    smoothing=0.35,
-    metric_ema=0.5,
-    threshold=0.005,
-    probe=3,
-    warmup=3,
-    div=25.0,
-    floor=1e-6,
-  ):
-    self.opt, self.peak, self.horizon, self.shape = optimizer, lr, horizon, shape
-    self.patience, self.ceiling_decay, self.floor = patience, ceiling_decay, floor
-    self.smoothing, self.metric_ema = smoothing, metric_ema
-    self.threshold, self.probe = threshold, probe
-    self.warmup, self.div, self.epoch, self.segment_start = warmup, div, 0, 0
+  def __init__(self, optimizer, lr, period=50,
+               shape: Decay = "cosine",  # any of decay.py's; linear holds near the peak, inverse near floor
+               t_mult=1.0, gamma=0.7, ceiling_floor=0.1,
+               warmup=5,  # each cycle re-warms: a peak that trains well warmed blows up cold
+               div=25.0, floor=1e-6):
+    self.opt, self.peak, self.shape = optimizer, lr, shape
+    self.peak0, self.gamma, self.ceiling_floor = lr, gamma, ceiling_floor
+    self.period, self.t_mult, self.cycle_len = period, t_mult, period
+    self.warmup, self.div, self.floor = warmup, div, floor
+    self.epoch, self.cycle, self.cycle_start = 0, 0, 0
     self.tapering, self.taper_decay = False, 0.7
-    self.target = self.current = lr / div
-    self.best, self.stale, self.smoothed = float("inf"), 0, None
-    self.probe_left, self.probe_best, self.pre_restart = 0, float("inf"), float("inf")
+    self.current = lr / div
     self._set(self.current)
 
   @property
@@ -53,83 +35,50 @@ class AdaptiveRestarts:
     for g in self.opt.param_groups:
       g["lr"] = max(value, self.floor)
 
-  def _anneal(self):
-    """Where this epoch sits in the current segment, a segment running from the last restart to the
-    end of training. Later restarts therefore anneal faster, having less run left to spend."""
-    span = max(self.horizon - self.segment_start, 1)
-    return decay_at(
-      self.shape, (self.epoch - self.segment_start) / span, self.peak, self.floor
-    )
+  def _rate(self):
+    """Where this epoch sits in its own cycle: a short climb to the ceiling, then the decay shape
+    down to the floor. Both are measured against `cycle_len`, never against the end of the run."""
+    into = self.epoch - self.cycle_start  # 1 .. cycle_len
+    warm = min(self.warmup, self.cycle_len // 2)  # never spend more than half a cycle climbing
+    if into <= warm:
+      return self.peak * (1 / self.div + (into / max(warm, 1)) * (1 - 1 / self.div))
+    return decay_at(self.shape, (into - warm) / max(self.cycle_len - warm, 1), self.peak, self.floor)
 
   def state_dict(self):
-    """Everything needed to carry on mid-slope: where the ceiling has been driven to, how stale the
-    metric is, both averages, and how far into warmup or a probe it got."""
+    """Everything needed to carry on mid-cycle: how far down the ceiling has been stepped, which
+    cycle is running and how long it is, and where in it we are."""
     return {k: v for k, v in self.__dict__.items() if k != "opt"}
 
   def load_state_dict(self, state):
     self.__dict__.update(state)
     self._set(self.current)
 
+  def revive(self):
+    """Put the ceiling back where it started and begin a fresh cycle. A run is resumed because
+    there is more to try, and inheriting a ceiling the last one walked down guarantees a crawl."""
+    self.peak, self.cycle_len = self.peak0, self.period
+    self.cycle, self.cycle_start = 0, self.epoch
+
   def taper(self, over=None):
-    """Stop pushing the rate back up and run it down to the floor. Until this is called the
-    schedule deliberately never finishes, so a run can be extended."""
+    """Stop restarting and run the rate down to the floor. One way, and the only thing that ends
+    the schedule: until it is called the cycles deliberately continue, which is what lets a run be
+    extended without picking an endpoint up front."""
     self.tapering = True
-    self.target = (
-      self.current
-    )  # they lag each other, so run down from where we actually are
     if over:
-      self.taper_decay = (self.floor / max(self.current, self.floor)) ** (
-        1 / max(over, 1)
-      )
+      self.taper_decay = (self.floor / max(self.current, self.floor)) ** (1 / max(over, 1))
 
-  def step(self, metric):
+  def step(self, metric=None):
+    """Once per epoch. A metric is accepted so the call site need not care which scheduler it
+    holds, and ignored: it selects checkpoints, it no longer steers the rate."""
     self.epoch += 1
-    self.smoothed = (
-      metric
-      if self.smoothed is None
-      else ((1 - self.metric_ema) * self.smoothed + self.metric_ema * metric)
-    )
-    m = self.smoothed
-
     if self.tapering:
-      self.target *= self.taper_decay
-      self.current += self.smoothing * (self.target - self.current)
+      self.current *= self.taper_decay
       return self._set(self.current)
 
-    if self.epoch <= self.warmup:
-      # linear climb to the peak; the adaptive logic only starts after
-      frac = self.epoch / self.warmup
-      self.best = min(self.best, m)
-      self.target = self.current = self.peak * (
-        1 / self.div + frac * (1 - 1 / self.div)
-      )
-      self.segment_start = self.epoch  # the anneal starts where warmup ends
-      return self._set(self.current)
+    if self.epoch - self.cycle_start > self.cycle_len:  # this cycle has run out, so open the next
+      self.cycle, self.cycle_start = self.cycle + 1, self.epoch - 1
+      self.cycle_len = max(1, round(self.cycle_len * self.t_mult))
+      self.peak = max(self.peak * self.gamma, self.peak0 * self.ceiling_floor)
 
-    if self.probe_left:
-      # judge a push on its best few epochs, not its first. Raising the rate costs before it pays,
-      # so a one-epoch verdict condemns every restart and walks the ceiling down to nothing
-      self.probe_best = min(self.probe_best, m)
-      self.probe_left -= 1
-      if not self.probe_left and self.probe_best >= self.pre_restart:
-        self.peak *= self.ceiling_decay
-      self.target = self._anneal()
-      self.current += self.smoothing * (self.target - self.current)
-      return self._set(self.current)
-
-    if m < self.best * (
-      1 - self.threshold
-    ):  # a gain has to be worth something to count
-      self.best, self.stale = m, 0
-    else:
-      self.best, self.stale = min(self.best, m), self.stale + 1
-
-    if self.stale > self.patience:
-      self.stale, self.pre_restart = 0, m
-      self.probe_left, self.probe_best = self.probe, float("inf")
-      self.segment_start, self.target = self.epoch, self.peak
-    else:
-      self.target = self._anneal()
-
-    self.current += self.smoothing * (self.target - self.current)  # ease, do not snap
+    self.current = self._rate()
     self._set(self.current)

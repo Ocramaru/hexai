@@ -1,81 +1,69 @@
-"""Training loop for the geometric VVAE. Runs detached, so it survives a closed laptop.
+"""Training loop for the geometric VVAE. run.py starts one, eval.py scores it.
 
-One run:
-
-    uv run python -m hexai.models.vvae.train --lr 0.003
-
-A sweep, defined by sweep.json alongside this file:
-
-    wandb sweep src/hexai/models/vvae/sweep.json
-    tmux new -s geo
-    wandb agent <entity>/<project>/<sweep_id>
-
-Checkpoints go to runs/vvae/, named after the flags that vary. Findings live in
-.agents/learned.md.
+Checkpoints go to .runs/ under the run's wandb name, with its config beside them as a json.
+Findings live in .agents/learned.md.
 
 Author: Marco Cassar (@Ocramaru)
 """
 
-import os
-
-os.environ["MPLBACKEND"] = "Agg"  # no display on a detached session
-
-import argparse
 import json
 import sys
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import Literal, get_args
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_angle_axis, quat_mul
 from tqdm import tqdm as _tqdm
 
-from hexai.data import (
-  TartanGroundConfig,
-  add_pose_noise,
-  environment_of,
-  split_context_target,
-  target_view,
-)
-from hexai.models.vvae import VVAEGeometric, VVAEGeometricConfig
-from hexai.utilities import AdaptiveRestarts
-from hexai.utilities.camera import pixel_to_camera_ray
+from hexai.data import add_depth_noise, add_pose_noise, environment_of, split_context_target
+from hexai.models.vvae.eval import baselines, summarise, validate
+from hexai.models.vvae.visuals import (log_context_strip, log_latent, log_novel_view,
+                                       log_pose_sweep, save_latent)
+from hexai.utilities import PeriodicRestarts, answerable_mask
 
-ROOT = Path(__file__).resolve().parents[4]
-TARTAN = Path(os.environ.get("TARTAN_ROOT", ROOT / "data/tartanground"))
-CHECKPOINTS = (
-  Path(__file__).parent / ".runs"
-)  # gitignored, beside the code it belongs to
+CHECKPOINTS = Path(__file__).parent / ".runs"  # gitignored, beside the code it belongs to
 
 # a bar redraws over itself on a terminal but floods a redirected log, so drop it when piped
-tqdm = partial(
-  _tqdm, file=sys.stdout, ncols=100, mininterval=2.0, disable=not sys.stdout.isatty()
-)
-
-DEPTH_CMAP = "magma"  # every depth panel, so one edit changes them all
-
-JITTER_FOVY = (
-  49.0  # the hexapod's lens; --jitter re-aims the head at this fov and masks
-)
+tqdm = partial(_tqdm, file=sys.stdout, ncols=100, mininterval=2.0, disable=not sys.stdout.isatty())
 
 METRIC_NOTES = """\
 wandb has no per-metric description, so the glossary lives here.
 
 skill             0 is no better than predicting the val set's mean image, 1 is perfect.
-                  The scale for recon, which has none on its own.
+                  The scale for recon, which has none on its own. Printed as skill/skill_
+                  answerable, and on a masked run only the second one means anything.
+skill_answerable  the same scale over the pixels a context frame actually saw, against a floor
+                  measured over those pixels too. A masked run is never taught the rest, so the
+                  whole-frame skill charges it for error no gradient ever reached.
 recon_answerable  recon over pixels a context frame actually saw, per pixel. The fair
                   comparison when some runs train with the mask and some do not.
+selection_score   the smoothed recon that -best.pt is chosen on, so the chart shows what did the
+                  choosing. One validation of this swings about as far as a whole run improves,
+                  so picking the best raw epoch picks the luckiest draw rather than the best model.
+skill_vs_copy     the same again, against handing back the anchor frame unchanged, which is what
+                  a system doing no work would answer. Without jitter a window spans ~4 degrees
+                  and copying is hard to beat; with it, ~21, and copying loses to the mean image.
+unknown_gap       mean predicted observedness where the carving saw, minus where it did not. 1 is
+                  perfect separation, 0 is a constant. unknown_mae cannot tell those apart, since
+                  most of the box is unobserved and guessing so scores well.
+unknown_mae       the same channel in absolute terms. Read it beside the gap, never alone.
+lift_fidelity     only with --learned_lift: how much the learned lift's volume resembles the
+                  one exact geometry would have produced. Not a target -- a lift that only reproduces the
+                  hard one has bought nothing -- but near zero means it is not placing geometry.
 lift_agreement    does the decoded volume match the geometry that went in, over observed
                   voxels only. Blind to unobserved space by construction.
 invented_density  density the decoder puts where no camera reached. Lower is better, but an
                   empty volume wins it outright, so read it beside lift_agreement.
+occluded_density  density sitting where the render's transmittance has already collapsed, which
+                  is what --occlusion charges for. A different quantity from invented_density:
+                  that one is unseen by the carving, this one is unseen by this query's render,
+                  so a voxel a context frame saw still counts here if the query is behind a wall.
+                  Logged whether or not the penalty is on, and an empty volume wins it outright.
 scene_corr        how alike different scenes decode. Near 1 means the decoder is ignoring
                   its input. A model emitting noise also scores well, so never read alone.
-unknown_mae       how well the observedness channel matches the carving. Only with unknown=1.
 depth_mae_m       depth error in metres, the one number with a physical unit.
 decoded_solid     fraction of the decoded volume above the occupancy threshold, against
 lifted_occupied   the same fraction of the volume that was lifted from depth. Matching them
@@ -91,682 +79,314 @@ reads otherwise keeps the last logged value, and these swing between epochs.
 """
 
 
-def vvae_loss(out, x, beta=1.0, observed=None, mask=None, kl_floor=0.1):
-  """Recon + KL, both summed per sample then meaned over the batch.
+Residual = Literal["mse", "l1", "huber"]
+DepthSpace = Literal["linear", "log", "inverse"]
+Scheduler = Literal["none", "onecycle", "periodic"]
 
-  mask drops target pixels, [B, H, W]. observed is [B, *latent_grid] in [0, 1] and scales the KL
-  per latent voxel: kl_floor where seen, full beta where not."""
-  err = F.mse_loss(out.x_hat, x, reduction="none")
-  recon = (err if mask is None else err * mask.unsqueeze(1)).flatten(1).sum(1)
-  kl = -0.5 * (1 + out.logvar - out.mu.pow(2) - out.logvar.exp())
-  if observed is not None:
-    weight = observed.mul(kl_floor - 1).add(1.0)  # kl_floor where seen, 1 where not
-    kl = kl * weight.unsqueeze(1)
-  return (
-    (recon + beta * kl.flatten(1).sum(1)).mean(),
-    recon.mean(),
-    kl.flatten(1).sum(1).mean(),
-  )
+RESIDUALS: dict[Residual, Callable] = {  # what the recon term asks of an uncertain ray, which decides blur
+  "mse": lambda e: e.pow(2),  # minimised by the conditional mean, so a bimodal ray renders between
+  "l1": lambda e: e.abs(),  # by the median, so it commits to one mode instead of averaging two
+  "huber": lambda e: F.huber_loss(e, torch.zeros_like(e), reduction="none", delta=0.1),
+}
 
-
-SCHEDULERS = ("none", "onecycle", "adaptive")
-
-
-METRIC_DRIVEN = (AdaptiveRestarts,)
+# the space the residual is measured in. Linear charges a 0.5 m error the same at 4 m as at 1 m,
+# where only the near one decides whether the robot can step; log and inverse both make it relative,
+# and inverse is what a monocular estimate is defined up to, which is how add_depth_noise degrades
+DEPTH_SPACES: dict[DepthSpace, Callable] = {
+  "linear": lambda d: d,
+  "log": lambda d: torch.log(d.clamp(min=0.02)),  # 8 cm of a 4 m box, so the range stays bounded
+  "inverse": lambda d: 1.0 / d.clamp(min=0.05),
+}
 
 
-def make_scheduler(name, optimizer, lr, total_steps, epochs=40):
-  """onecycle warms up over the first 30% then anneals to nothing. adaptive warms up the same
-  way but holds rate in reserve, and steps on the validation metric rather than per batch."""
-  if name == "onecycle":
-    return torch.optim.lr_scheduler.OneCycleLR(
-      optimizer, max_lr=lr, total_steps=total_steps
-    )
-  if name == "adaptive":
-    # decay is sized to the run: with no restarts the rate lands near 1% of peak on the last
-    # epoch. A fixed decay bottoms out early on a long run and wastes its tail
-    return AdaptiveRestarts(
-      optimizer, lr, horizon=epochs, warmup=max(1, round(0.3 * epochs))
-    )
-  return None
+def vvae_loss(out, x, beta=1.0, observed=None, mask=None, kl_floor=0.1, occlusion=0.0,
+              residual="mse", depth_space="linear"):
+    """Recon + KL, both summed per sample then meaned over the batch.
+
+    mask drops target pixels, [B, H, W]. observed is [B, *latent_grid] in [0, 1] and scales the KL
+    per latent voxel: kl_floor where seen, full beta where not.
+
+    occlusion charges for density where the render's transmittance has already collapsed. An empty
+    volume wins it outright, so read lift_agreement beside it.
+
+    residual and depth_space set what an uncertain ray is charged for. See RESIDUALS above."""
+    warp = DEPTH_SPACES[depth_space]
+    err = RESIDUALS[residual](warp(out.x_hat) - warp(x))
+    recon = (err if mask is None else err * mask.unsqueeze(1)).flatten(1).sum(1)
+    kl = -0.5 * (1 + out.logvar - out.mu.pow(2) - out.logvar.exp())
+    if observed is not None:
+        weight = observed.mul(kl_floor - 1).add(1.0)  # kl_floor where seen, 1 where not
+        kl = kl * weight.unsqueeze(1)
+    total = recon + beta * kl.flatten(1).sum(1)
+    if occlusion and out.occluded is not None: total = total + occlusion * out.occluded
+    return total.mean(), recon.mean(), kl.flatten(1).sum(1).mean()
 
 
-def out_vol(model, z):
-  """The decoded grid. decoder.volume is the raw grid; forward also returns it, so this exists
-  only for the places that decode a latent on their own."""
-  return model.decoder.volume(z)
+SCHEDULERS = get_args(Scheduler)
 
 
-@torch.no_grad()
-def answerable_mask(model, carved, truth, query):
-  """[B, H, W] in [0, 1]: for each target pixel, how much the context frames observed the point
-  it sits on. Read from the carving, not the model's own coverage, which would be gameable."""
-  cfg = model.config
-  h, w = cfg.render_hw
-  k_inv = pixel_to_camera_ray((h, w), cfg.source_fovy_deg).to(truth)
-  v, u = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
-  pix = torch.stack([u.flatten(), v.flatten(), torch.ones(h * w)]).to(truth)
-  rays = (k_inv @ pix)[None]  # [1, 3, H*W]
-  metres = (truth[:, -1] * cfg.depth_max).flatten(1)[:, None]  # [B, 1, H*W]
-  local = rays * metres
-  rot = torch.stack([matrix_from_quat(q[3:]) for q in query])
-  pts = rot @ local + query[:, :3, None]  # canonical frame
+PER_EPOCH = (PeriodicRestarts,)  # stepped once a validation, not once a batch
 
-  lower = cfg.bounds[0].to(truth)[None, :, None]
-  span = (cfg.bounds[1] - cfg.bounds[0]).to(truth)[None, :, None]
-  unit = ((pts - lower) / span * 2 - 1).flip(1)  # grid_sample reads xyz reversed
-  grid = unit.permute(0, 2, 1)[:, None, None]  # [B, 1, 1, H*W, 3]
-  seen = F.grid_sample(carved[:, 1:], grid, align_corners=False, padding_mode="zeros")
-  return seen.view(-1, h, w).clamp(0, 1)
+# how much of each epoch's score the selection average takes; at 0.2 it keeps about a third of a
+# single validation's spread, so -best.pt tracks where the model is rather than which epoch was lucky
+SELECT_EMA = 0.2
+
+
+def make_scheduler(name, optimizer, lr, total_steps, period=50, warmup=0, shape="cosine"):
+    """onecycle warms up over the first 30% then anneals to nothing, so it has to be told how long
+    the run is. periodic anneals over a fixed period instead and begins again from a lower ceiling,
+    so it never needs one and a run can be extended by asking for more epochs."""
+    if name == "onecycle":
+        return torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, total_steps=total_steps)
+    if name == "periodic":
+        # warmup is per cycle here, not per run, so it is a handful of epochs rather than a third
+        return PeriodicRestarts(optimizer, lr, period=period, warmup=warmup or 5, shape=shape)
+    return None
+
+
+def checkpoint(model, optimizer, sched, config, epoch, global_step, score, smoothed):
+    """Everything needed to carry on: weights, optimiser and schedule state, and where we were.
+    Both scores travel: the epoch's own for reading, the smoothed one for choosing."""
+    return {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+            "scheduler": sched.state_dict() if sched else None, "epoch": epoch,
+            "global_step": global_step, "config": config, "score": score, "smoothed": smoothed}
+
+
+def write_checkpoints(state, name, best_score, snapshot_every=0):
+    """Latest, best and a periodic snapshot; returns the best score so far. Lower is better.
+    Latest alone loses the good state whenever a run regresses, which they do.
+
+    Best is chosen on the smoothed score, never the epoch's own. A single validation swings about
+    as far as a whole run improves, so picking on it picks the luckiest draw rather than the best
+    model. See .agents/learned.md."""
+    state["tag"] = name  # so a --resume can find its way back to this lineage
+    torch.save(state, CHECKPOINTS / f'{name}.pt')
+    if state["smoothed"] < best_score:
+        best_score = state["smoothed"]
+        torch.save(state, CHECKPOINTS / f'{name}-best.pt')
+        print(f'  new best, {best_score:.1f} smoothed ({state["score"]:.1f} this epoch)', flush=True)
+    if snapshot_every and state["epoch"] % snapshot_every == 0:
+        torch.save(state, CHECKPOINTS / f'{name}-e{state["epoch"]}.pt')
+    return best_score
+
+
+def restore(path, name, model, optimizer, sched, revive=True):
+    """Put a run back where it was; returns (global_step, epoch, best_score, smoothed). Weights
+    alone are not enough, since a schedule mid-cycle needs its own state back, and so does the
+    average the best checkpoint is chosen on -- restarting that would let the first epoch after a
+    resume win on its own.
+
+    No horizon to repair here: a cycle is a fixed span, so continuing costs nothing but more of
+    them."""
+    ckpt = torch.load(path, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    if sched and ckpt.get("scheduler"): sched.load_state_dict(ckpt["scheduler"])
+    if isinstance(sched, PeriodicRestarts) and revive:
+        sched.revive()  # a resume means there is more to try, not less
+    best = CHECKPOINTS / f'{name}-best.pt'  # ckpt holds the last score, which need not be the best
+    prior = torch.load(best, weights_only=False) if best.exists() else {}
+    # checkpoints from before selection was smoothed carry only the raw score; fall back to it so
+    # a run started under the old scheme still resumes, rather than dying on a missing key
+    best_score = prior.get("smoothed") or prior.get("score", float("inf"))
+    print(f'resumed {path} at epoch {ckpt["epoch"]}, lr {optimizer.param_groups[0]["lr"]:.2e}, '
+          f'best {best_score:.1f}', flush=True)
+    return ckpt["global_step"], ckpt["epoch"], best_score, ckpt.get("smoothed")
 
 
 @torch.no_grad()
 def observed_weight(model, context, context_poses, kl_mode, carved=None):
-  """[B, *latent_grid] of how much of each latent voxel's region was seen, or None for a flat KL.
-  Pooled down from the carving by the same factor the encoder downsamples by, so one weight lands
-  on one latent voxel."""
-  if kl_mode != "observed":
-    return None
-  seen = (model.encoder.carve(context, context_poses) if carved is None else carved)[
-    :, 1:
-  ]
-  shrink = model.config.downsample_scale**model.config.n_downsamples
-  return F.avg_pool3d(seen, shrink)[:, 0]
+    """[B, *latent_grid] of how much of each latent voxel's region was seen, or None for a flat KL.
+    Pooled down from the carving by the same factor the encoder downsamples by, so one weight lands
+    on one latent voxel."""
+    if kl_mode != "observed":
+        return None
+    seen = (model.encoder.carve(context, context_poses) if carved is None else carved)[:, 1:]
+    shrink = model.config.downsample_scale ** model.config.n_downsamples
+    return F.avg_pool3d(seen, shrink)[:, 0]
 
 
-def _yaw_view(frame, fovy_deg, yaw_deg):
-  """[4, H, W] re-rendered as the same camera turned about its own optical centre. No parallax in
-  a pure rotation, so the homography is exact; depth divides by the rotated ray's z because it
-  measures along the optical axis and that axis moved. Edges that leave the source go black."""
-  _, h, w = frame.shape
-  k_inv = pixel_to_camera_ray((h, w), fovy_deg).to(frame)
-  v, u = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
-  pix = torch.stack([u.flatten(), v.flatten(), torch.ones(h * w)]).to(frame)
-  a = torch.deg2rad(torch.tensor(float(yaw_deg)))
-  rot = torch.tensor([[a.cos(), 0, a.sin()], [0, 1, 0], [-a.sin(), 0, a.cos()]]).to(
-    frame
-  )
-  rays = rot @ (k_inv @ pix)
-  src = torch.linalg.inv(k_inv) @ rays
-  xy = (src[:2] / src[2]) / torch.tensor([[w - 1], [h - 1]]).to(frame) * 2 - 1
-  out = F.grid_sample(frame[None], xy.T.view(1, h, w, 2), align_corners=True)[0]
-  return torch.cat([out[:3], out[3:] / rays[2].view(1, h, w).clamp(min=1e-6)]).clamp(
-    0, 1
-  )
+def train_geometric(model, train_loader, test_loader, name=None, epochs=20, lr=0.001, beta=1.0,
+                    device='cuda', n_epochs=5, pose_noise=0.02, depth_noise=0.0, warmup=0,
+                    project="vvae",
+                    scheduler="none", shape="cosine", period=50, target="rgb", scenes=3, kl_mode="uniform", mask_unknown=False, unknown_weight=1.0, occlusion=0.0, residual="mse", depth_space="linear",
+                    resume=None, taper=False, revive=True, snapshot_every=50):
+    dataset = train_loader.dataset.dataset  # Subset -> the dataset it indexes into
+    assert dataset.camera == model.camera, f"dataset {dataset.camera} != model {model.camera}"
 
+    config = {  # names match sweep.json's parameters, so an agent's values land on the same keys
+        "epochs": epochs,
+        "batch_size": train_loader.batch_size,
+        "lr": lr,
+        "beta": beta,
+        "kl_mode": kl_mode,
+        "mask_unknown": mask_unknown,
+        "predict_unknown": model.config.predict_unknown,
+        "scheduler": scheduler,
+        "shape": shape,
+        "period": period,
+        "target": target,
+        "pose_noise": pose_noise,
+        "depth_noise": depth_noise,
+        "occlusion": occlusion,
+        "residual": residual,
+        "depth_space": depth_space,
+        "learned_lift": model.config.learned_lift,
+        "steps_per_epoch": len(train_loader),
+        "camera_fovy": dataset.camera[1],
+        "num_frames": dataset.num_frames,
+        "environments": sorted({environment_of(p) for p in train_loader.dataset.trajectory_paths}),
+        "val_env": sorted({environment_of(p) for p in test_loader.dataset.trajectory_paths}),
+        "head_jitter": dataset.include_head_jitter,
+        "grid": model.config.grid_resolution,
+        "latent": model.config.latent_shape,
+        "base_channels": model.config.base_channels,
+        "groups": model.config.groups,
+        "enc_params": sum(p.numel() for p in model.encoder.parameters()),
+        "camera": model.camera,
+        "model": model.__class__.__name__,
+        "optimizer": "Adam",
+    }
 
-def _row_corr(a, b):
-  """Pearson correlation between matching rows of two [N, D] tensors."""
-  a, b = a - a.mean(1, keepdim=True), b - b.mean(1, keepdim=True)
-  return (a * b).sum(1) / (a.norm(dim=1) * b.norm(dim=1)).clamp(min=1e-8)
+    CHECKPOINTS.mkdir(exist_ok=True)
+    with wandb.init(project=project, name=name, config=config, notes=METRIC_NOTES) as run:
+        # wandb names a run for us and never repeats one, so checkpoints cannot collide. An offline
+        # run has no name though, and every one of them would land on None.pt -- hence the id
+        tag = name or run.name or run.id
+        if resume and not name:  # a continuation belongs on the run it continues, or its snapshots
+            prior = torch.load(resume, weights_only=False).get("tag")  # scatter across fun names
+            if prior: tag = prior
+        # the name says nothing about the run, so what it was lives beside it: one small json each,
+        # greppable, so `grep -l '"occlusion": 1000' .runs/*.json` finds it without loading 14 MB
+        (CHECKPOINTS / f'{tag}.json').write_text(json.dumps(config, indent=1, default=str))
+        print(f'{tag}: {json.dumps(config, default=str)}', flush=True)
+        model = model.to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        sched = make_scheduler(scheduler, optimizer, lr, epochs * len(train_loader), period,
+                               warmup, shape)
+        per_batch_lr = sched is not None and not isinstance(sched, PER_EPOCH)
 
+        # epoch as its own axis; runs with different steps_per_epoch only align on it
+        run.define_metric("epoch")
+        for section in ("val/*", "train/recon_epoch", "train/lr"):
+            run.define_metric(section, step_metric="epoch")
+        # wandb keeps the running best itself, under a suffixed key: val/lift_agreement.max and
+        # val/scene_corr.min, which is what a sweep should be pointed at
+        run.define_metric("val/lift_agreement", step_metric="epoch", summary="max")
+        run.define_metric("val/scene_corr", step_metric="epoch", summary="min")
+        run.define_metric("val/recon_answerable", step_metric="epoch", summary="min")
+        run.define_metric("val/selection_score", step_metric="epoch", summary="min")
+        run.define_metric("val/depth_mae_m", step_metric="epoch", summary="min")
+        run.define_metric("val/skill", step_metric="epoch", summary="max")
+        run.define_metric("val/skill_answerable", step_metric="epoch", summary="max")
+        run.define_metric("val/skill_vs_copy", step_metric="epoch", summary="max")
+        run.define_metric("val/unknown_gap", step_metric="epoch", summary="max")
+        run.define_metric("val/lift_fidelity", step_metric="epoch")
+        run.define_metric("val/unknown_mae", step_metric="epoch", summary="min")
+        run.define_metric("val/invented_density", step_metric="epoch", summary="min")
+        run.define_metric("val/occluded_density", step_metric="epoch", summary="min")
 
-def _show(ax, img, title):
-  """[C, H, W] in [0, 1]. Three channels are rgb, anything else is colour-mapped depth, which is
-  always the last channel. Depth is pinned to 0-1 so one colour is one distance in every panel."""
-  a = img.permute(1, 2, 0).numpy()
-  if a.shape[2] == 3:
-    ax.imshow(a)
-  else:
-    ax.imshow(a[..., -1], cmap=DEPTH_CMAP, vmin=0.0, vmax=1.0)
-  ax.set_title(title)
+        # two fixed val scenes, picked by index so they are identical in every run and comparable
+        # across them, plus one drawn fresh from training each time it is logged. The fixed pair
+        # shows whether the model is improving; the roving one shows what it is being shown, which
+        # a single held-out building cannot
+        val_set, train_set = test_loader.dataset, train_loader.dataset
+        picks = torch.linspace(0, len(val_set) - 1, max(scenes - 1, 1)).round().long().tolist()
+        samples = [tuple(x.unsqueeze(0) for x in val_set[i]) for i in picks]
 
+        def roving():
+            i = int(torch.randint(len(train_set), (1,)))
+            return tuple(x.unsqueeze(0) for x in train_set[i]), i
 
-def _floor_plan(ax, density, pose, config, title):
-  """Density summed down the vertical axis, so it reads as a floor plan rather than a view. The
-  box is the window's middle camera, and the arrow is where the query camera sits inside it and
-  which way it looks."""
-  ax.imshow(density.sum(1).T.numpy(), origin="lower", cmap="magma", aspect="auto")
-  lower, size = config.bounds[0], config.bounds[1] - config.bounds[0]
-  grid = torch.tensor(config.grid_resolution, dtype=torch.float32)
-  x, _, z = (pose[:3].cpu() - lower) / size * grid
-  heading = matrix_from_quat(pose[3:].cpu()) @ torch.tensor([0.0, 0.0, 1.0])
-  ax.arrow(
-    float(x),
-    float(z),
-    float(heading[0]) * 5,
-    float(heading[2]) * 5,
-    head_width=1.4,
-    color="cyan",
-    length_includes_head=True,
-  )
-  ax.set_title(title)
+        print(f"logging val scenes {picks} of {len(val_set)}, plus one drawn from training",
+              flush=True)
+        global_step, first_epoch, best_score, smoothed = 1, 0, float("inf"), None
+        if resume:
+            global_step, first_epoch, best_score, smoothed = restore(resume, tag, model,
+                                                                     optimizer, sched, revive)
+        if taper and isinstance(sched, PeriodicRestarts):
+            torch.save(checkpoint(model, optimizer, sched, config, first_epoch, global_step,
+                                  best_score, smoothed), CHECKPOINTS / f'{tag}-pretaper.pt')
+            sched.taper(over=epochs)  # one-way, hence the snapshot above
+            print(f'tapering to {sched.floor:.0e} over {epochs} epochs', flush=True)
 
+        floors = baselines(model, test_loader, device, target)  # the zero points for val/skill*
+        whole, mean_seen, copy_seen, graded = floors
+        print(f'baselines over {graded:.0%} of the frame: mean image {mean_seen:.1f} '
+              f'(whole frame {whole:.1f}), copy the anchor {copy_seen:.1f}', flush=True)
 
-@torch.no_grad()
-def log_novel_view(
-  model, batch, step=None, key="media/novel", target=1, mode="rgb", note=""
-):
-  """Truth against the render, and the lifted volume against the decoded one. The image pair alone
-  cannot tell undertrained from broken -- a saturated density field also renders flat grey -- so
-  the volumes go beside it, and the density fractions go up as scalars."""
-  was_training = model.training
-  model.eval()
-  device = next(model.parameters()).device
-  frames, poses = batch
-  context, context_poses, truth, query = split_context_target(
-    frames[:1], poses[:1], target, mode
-  )
-  context, context_poses = context.to(device), context_poses.to(device)
-  out = model(context, context_poses, query.to(device))
-  lifted = model.encoder.lift(context, context_poses)[0].cpu()
-  decoded = out_vol(model, out.mu)[0].cpu()
-  if was_training:
-    model.train()
+        for epoch in range(first_epoch, first_epoch + epochs):
+            model.train()
+            pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{first_epoch + epochs}')
+            train_recon, train_batches = 0.0, 0
 
-  fig, axes = plt.subplots(1, 4, figsize=(14, 3.8))
-  _show(axes[0], truth[0], "truth, held out")
-  _show(axes[1], out.x_hat[0].cpu().clamp(0, 1), "rendered from its pose")
-  _floor_plan(axes[2], lifted[3], query[0], model.config, "lifted volume, top-down")
-  _floor_plan(
-    axes[3],
-    decoded[model.config.density_index],
-    query[0],
-    model.config,
-    "decoded volume, top-down",
-  )
-  for ax in axes:
-    ax.set(xticks=[], yticks=[])
-  if note:
-    fig.suptitle(note, fontsize=9)
-  fig.tight_layout()
+            for i, (frames, poses) in enumerate(pbar, 1):
+                poses = add_pose_noise(poses, pose_noise)  # the pose quality deployment will have
+                context, context_poses, truth, query = split_context_target(frames, poses, mode=target)
+                optimizer.zero_grad()
 
-  if wandb.run is not None:
-    wandb.log(
-      {
-        key: wandb.Image(fig),
-        "val/lifted_occupied": (lifted[3] > 1e-3).float().mean().item(),
-        "val/decoded_solid": (decoded[model.config.density_index] > 0.5)
-        .float()
-        .mean()
-        .item(),
-        "val/decoded_mean": decoded[model.config.density_index].mean().item(),
-      },
-      step=step,
-    )
-  plt.close(fig)
+                context, context_poses = context.to(device), context_poses.to(device)
+                truth, query = truth.to(device), query.to(device)
+                seen = add_depth_noise(context, depth_noise) if depth_noise else context
+                # carved first, so its observedness can gate the occlusion charge. Built from the
+                # clean context like the unknown head's target: it is supervision, not an input
+                needs_carve = mask_unknown or kl_mode == "observed" or model.config.predict_unknown
+                carved = model.encoder.carve(context, context_poses) if needs_carve else None
+                out = model(seen, context_poses, query,
+                            gate=carved[:, 1:2] if carved is not None else None)
+                mask = (answerable_mask(carved, truth, query, model.config.bounds, *model.camera)
+                        if mask_unknown and carved is not None else None)
+                t_loss, t_recon, t_kl = vvae_loss(
+                    out, truth, beta,
+                    observed_weight(model, context, context_poses, kl_mode, carved), mask,
+                    occlusion=occlusion, residual=residual, depth_space=depth_space)
+                if model.config.predict_unknown and carved is not None:
+                    # the unknown head, supervised everywhere against the carving
+                    t_loss = t_loss + unknown_weight * F.mse_loss(
+                        out.volume[:, -1], carved[:, 1], reduction="none").flatten(1).sum(1).mean()
+                t_loss.backward()
+                optimizer.step()
+                if sched and not isinstance(sched, PER_EPOCH): sched.step()
 
+                train_recon, train_batches = train_recon + t_recon.item(), train_batches + 1
+                pbar.set_postfix(loss=f'{t_loss.item():.3g}', recon=f'{t_recon.item():.3g}', kl=f'{t_kl.item():.3g}')
+                step_log = {"train/loss": t_loss.item(), "train/recon": t_recon.item(),
+                            "train/kl": t_kl.item(), "epoch": epoch + i / len(train_loader)}
+                if out.occluded is not None: step_log["train/occluded"] = out.occluded.mean().item()
+                if per_batch_lr:  # a metric-driven schedule only moves once an epoch
+                    step_log["train/lr"] = optimizer.param_groups[0]["lr"]
+                run.log(step_log, step=global_step)
+                global_step += 1
 
-@torch.no_grad()
-def log_pose_sweep(
-  model,
-  batch,
-  step=None,
-  key="media/sweep",
-  target=1,
-  mode="rgb",
-  note="",
-  yaws=(-24, -12, 12, 24),
-):
-  """Truth over render, angle by angle. The latent is encoded once and rendered from each yaw, so
-  a row that stays the same across the sweep is a latent that has stopped depending on viewpoint,
-  which no single-pose panel can show. Truth is the target frame turned about its optical centre,
-  which is exact for a rotation."""
-  was_training = model.training
-  model.eval()
-  device = next(model.parameters()).device
-  frames, poses = batch
-  context, context_poses, _, query = split_context_target(
-    frames[:1], poses[:1], target, mode
-  )
-  mu, _ = model.encoder(context.to(device), context_poses.to(device))
+            metrics = validate(model, test_loader, device, target, beta, floors, vvae_loss)
+            metrics |= {"train/recon_epoch": train_recon / max(train_batches, 1),
+                        "train/lr": optimizer.param_groups[0]["lr"], "epoch": epoch + 1}
 
-  up = torch.tensor(
-    [0.0, 1.0, 0.0], device=device
-  )  # camera y is down, so yaw turns about it
-  # a yaw past a third of the fov aims the truth panel off the source frame
-  limit = model.config.source_fovy_deg / 3
-  offsets = sorted({round(max(-limit, min(limit, y))) for y in (*yaws, 0.0)})
-  source = frames[
-    0, :, target
-  ]  # the full rgb+depth frame, before the target mode trims it
-  truths, renders = [], []
-  for deg in offsets:
-    turn = quat_from_angle_axis(
-      torch.deg2rad(torch.tensor([float(deg)], device=device)), up
-    )
-    q = query.to(device).clone()
-    q[:, 3:] = quat_mul(q[:, 3:], turn)
-    renders.append(model.decoder(mu, q)[0][0].cpu().clamp(0, 1))  # (image, volume)
-    truths.append(
-      target_view(_yaw_view(source, model.config.source_fovy_deg, deg)[None], mode)[0]
-    )
-  if was_training:
-    model.train()
+            # a masked run optimises the answerable pixels, so that is what selection must read;
+            # scoring the whole frame reads error the gradients never touched
+            score = metrics["val/recon_answerable" if mask_unknown else "val/recon"]
+            smoothed = score if smoothed is None else (1 - SELECT_EMA) * smoothed + SELECT_EMA * score
+            metrics["val/selection_score"] = smoothed  # logged, so the chart shows what chose
+            print(summarise(epoch + 1, metrics), flush=True)
+            run.log(metrics, step=global_step)
 
-  fig, axes = plt.subplots(2, len(offsets), figsize=(2.6 * len(offsets), 5.6))
-  for col, deg in enumerate(offsets):
-    label = "its pose" if deg == 0 else f"{deg:+.0f} deg"
-    _show(axes[0, col], truths[col], f"truth {label}")
-    _show(axes[1, col], renders[col], f"render {label}")
-  for ax in axes.ravel():
-    ax.set(xticks=[], yticks=[])
-  if note:
-    fig.suptitle(note, fontsize=9)
-  fig.tight_layout()
+            if isinstance(sched, PER_EPOCH): sched.step(score)
+            state = checkpoint(model, optimizer, sched, config, epoch + 1, global_step, score,
+                               smoothed)
+            best_score = write_checkpoints(state, tag, best_score, snapshot_every)
 
-  if wandb.run is not None:
-    flat = torch.stack([r.flatten() for r in renders])
-    spread = (
-      _row_corr(flat[:-1], flat[1:]).mean().item()
-    )  # 1.0 means the pose changes nothing
-    wandb.log(
-      {
-        key: wandb.Image(fig),
-        f"val/viewpoint_sameness/{key.split(chr(47))[-1]}": spread,
-      },
-      step=step,
-    )
-  plt.close(fig)
-  return fig
-
-
-def train_geometric(
-  model,
-  train_loader,
-  test_loader,
-  name=None,
-  epochs=20,
-  lr=0.001,
-  beta=1.0,
-  device="cuda",
-  n_epochs=5,
-  pose_noise=0.02,
-  project="vvae",
-  scheduler="none",
-  target="rgb",
-  scenes=3,
-  kl_mode="uniform",
-  mask_unknown=False,
-  unknown_weight=1.0,
-  resume=None,
-  taper=False,
-):
-  dataset = train_loader.dataset.dataset  # Subset -> the dataset it indexes into
-  assert dataset.camera == model.camera, (
-    f"dataset {dataset.camera} != model {model.camera}"
-  )
-
-  config = {  # names match sweep.json's parameters, so an agent's values land on the same keys
-    "epochs": epochs,
-    "batch_size": train_loader.batch_size,
-    "lr": lr,
-    "beta": beta,
-    "kl_mode": kl_mode,
-    "mask_unknown": mask_unknown,
-    "predict_unknown": model.config.predict_unknown,
-    "scheduler": scheduler,
-    "target": target,
-    "pose_noise": pose_noise,
-    "steps_per_epoch": len(train_loader),
-    "camera_fovy": dataset.camera[1],
-    "num_frames": dataset.num_frames,
-    "environments": sorted(
-      {environment_of(p) for p in train_loader.dataset.trajectory_paths}
-    ),
-    "val_env": sorted(
-      {environment_of(p) for p in test_loader.dataset.trajectory_paths}
-    ),
-    "head_jitter": dataset.include_head_jitter,
-    "grid": model.config.grid_resolution,
-    "latent": model.config.latent_shape,
-    "base_channels": model.config.base_channels,
-    "groups": model.config.groups,
-    "enc_params": sum(p.numel() for p in model.encoder.parameters()),
-    "camera": model.camera,
-    "model": model.__class__.__name__,
-    "optimizer": "Adam",
-  }
-
-  CHECKPOINTS.mkdir(exist_ok=True)
-  run = wandb.init(project=project, name=name, config=config, notes=METRIC_NOTES)
-  try:
-    model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    sched = make_scheduler(scheduler, optimizer, lr, epochs * len(train_loader), epochs)
-    per_batch_lr = sched is not None and not isinstance(sched, METRIC_DRIVEN)
-
-    # epoch as its own axis; runs with different steps_per_epoch only align on it
-    run.define_metric("epoch")
-    for section in ("val/*", "train/recon_epoch", "train/lr"):
-      run.define_metric(section, step_metric="epoch")
-    # wandb keeps the running best itself, under a suffixed key: val/lift_agreement.max and
-    # val/scene_corr.min, which is what a sweep should be pointed at
-    run.define_metric("val/lift_agreement", step_metric="epoch", summary="max")
-    run.define_metric("val/scene_corr", step_metric="epoch", summary="min")
-    run.define_metric("val/skill", step_metric="epoch", summary="max")
-    run.define_metric("val/invented_density", step_metric="epoch", summary="min")
-
-    # two fixed val scenes, picked by index so they are identical in every run and comparable
-    # across them, plus one drawn fresh from training each time it is logged. The fixed pair
-    # shows whether the model is improving; the roving one shows what it is being shown, which
-    # a single held-out building cannot
-    val_set, train_set = test_loader.dataset, train_loader.dataset
-    picks = (
-      torch.linspace(0, len(val_set) - 1, max(scenes - 1, 1)).round().long().tolist()
-    )
-    samples = [tuple(x.unsqueeze(0) for x in val_set[i]) for i in picks]
-
-    def roving():
-      i = int(torch.randint(len(train_set), (1,)))
-      return tuple(x.unsqueeze(0) for x in train_set[i]), i
-
-    print(
-      f"logging val scenes {picks} of {len(val_set)}, plus one drawn from training",
-      flush=True,
-    )
-    global_step, first_epoch = 1, 0
-    if (
-      resume
-    ):  # weights alone are not enough: a schedule mid-slope needs its own state back
-      ckpt = torch.load(resume, weights_only=False)
-      model.load_state_dict(ckpt["model"])
-      optimizer.load_state_dict(ckpt["optimizer"])
-      if sched and ckpt.get("scheduler"):
-        sched.load_state_dict(ckpt["scheduler"])
-      global_step = ckpt["global_step"]
-      first_epoch = ckpt["epoch"]
-      print(
-        f"resumed {resume} at epoch {first_epoch}, lr {optimizer.param_groups[0]['lr']:.2e}",
-        flush=True,
-      )
-    if taper and isinstance(sched, AdaptiveRestarts):
-      sched.taper(over=epochs)  # stop holding rate in reserve, anneal out from here
-      print(f"tapering to {sched.floor:.0e} over {epochs} epochs", flush=True)
-
-    # what predicting the val set's mean image scores, the zero point for val/skill
-    with torch.no_grad():
-      truths = torch.cat(
-        [split_context_target(f, p, 1, target)[2] for f, p in test_loader]
-      )
-      floor = (
-        F.mse_loss(
-          truths.mean(0, keepdim=True).expand_as(truths), truths, reduction="none"
-        )
-        .flatten(1)
-        .sum(1)
-        .mean()
-        .item()
-      )
-    print(f"mean-image baseline: recon {floor:.1f}", flush=True)
-
-    for epoch in range(first_epoch, first_epoch + epochs):
-      model.train()
-      pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{first_epoch + epochs}")
-      train_recon, train_batches = 0.0, 0
-
-      for i, (frames, poses) in enumerate(pbar, 1):
-        poses = add_pose_noise(
-          poses, pose_noise
-        )  # the pose quality deployment will have
-        context, context_poses, truth, query = split_context_target(
-          frames, poses, mode=target
-        )
-        optimizer.zero_grad()
-
-        context, context_poses = context.to(device), context_poses.to(device)
-        truth, query = truth.to(device), query.to(device)
-        out = model(context, context_poses, query)
-        needs_carve = (
-          mask_unknown or kl_mode == "observed" or model.config.predict_unknown
-        )
-        carved = model.encoder.carve(context, context_poses) if needs_carve else None
-        mask = answerable_mask(model, carved, truth, query) if mask_unknown else None
-        t_loss, t_recon, t_kl = vvae_loss(
-          out,
-          truth,
-          beta,
-          observed_weight(model, context, context_poses, kl_mode, carved),
-          mask,
-        )
-        if model.config.predict_unknown and carved is not None:
-          # the unknown head, supervised everywhere against the carving
-          t_loss = (
-            t_loss
-            + unknown_weight
-            * F.mse_loss(out.volume[:, -1], carved[:, 1], reduction="none")
-            .flatten(1)
-            .sum(1)
-            .mean()
-          )
-        t_loss.backward()
-        optimizer.step()
-        if sched and not isinstance(sched, METRIC_DRIVEN):
-          sched.step()
-
-        train_recon, train_batches = train_recon + t_recon.item(), train_batches + 1
-        pbar.set_postfix(
-          loss=f"{t_loss.item():.3g}",
-          recon=f"{t_recon.item():.3g}",
-          kl=f"{t_kl.item():.3g}",
-        )
-        step_log = {
-          "train/loss": t_loss.item(),
-          "train/recon": t_recon.item(),
-          "train/kl": t_kl.item(),
-          "epoch": epoch + i / len(train_loader),
-        }
-        if per_batch_lr:  # a metric-driven schedule only moves once an epoch
-          step_log["train/lr"] = optimizer.param_groups[0]["lr"]
-        run.log(step_log, step=global_step)
-        global_step += 1
-
-      model.eval()
-      totals, n, scene_corr, agree, mae = [0.0, 0.0, 0.0], 0, [], [], []
-      answerable, seen_px, invent, unknown_err = 0.0, 0.0, [], []
-      with torch.no_grad():
-        for frames, poses in test_loader:
-          context, context_poses, truth, query = split_context_target(
-            frames, poses, 1, target
-          )
-          context, context_poses = context.to(device), context_poses.to(device)
-          truth, query = truth.to(device), query.to(device)
-          out = model(context, context_poses, query)
-          losses = vvae_loss(out, truth, beta)  # always mse, so runs compare
-          totals = [
-            t + v.item() * len(frames) for t, v in zip(totals, losses, strict=True)
-          ]
-          n += len(frames)
-          if target != "rgb":  # depth in metres, the one number with physical meaning
-            mae.append(
-              (
-                (out.x_hat[:, -1] - truth[:, -1]).abs().mean() * model.config.depth_max
-              ).item()
-            )
-
-          # both maskings every run, so masked and unmasked cells stay comparable
-          carved_v = model.encoder.carve(context, context_poses)
-          vmask = answerable_mask(model, carved_v, truth, query)
-          sq = (out.x_hat - truth) ** 2
-          answerable += (sq * vmask.unsqueeze(1)).flatten(1).sum(1).sum().item()
-          seen_px += vmask.mean().item() * len(frames)
-
-          decoded = out_vol(model, out.mu)[:, model.config.density_index].flatten(1)
-          lifted = model.encoder.lift(context, context_poses)[:, -1].flatten(1)
-          # only where rays landed; most of the box is unobserved, not empty
-          seen = lifted > 1e-3
-          agree.append(_row_corr(decoded * seen, lifted * seen).mean().item())
-
-          # density put where no camera reached; lift_agreement cannot see this
-          never = carved_v[:, 1].flatten(1) < 0.5
-          invent.append(
-            (decoded * never).sum().item() / never.sum().clamp(min=1).item()
-          )
-          if model.config.predict_unknown:
-            pred = out_vol(model, out.mu)[:, -1].flatten(1)
-            unknown_err.append((pred - carved_v[:, 1].flatten(1)).abs().mean().item())
-          if len(frames) > 1:  # how alike the decoded volumes of different scenes are.
-            c = torch.corrcoef(decoded).fill_diagonal_(0)  # near 1 means the decoder
-            scene_corr.append((c.sum() / (len(decoded) * (len(decoded) - 1))).item())
-
-      v_loss, v_recon, v_kl = [t / n for t in totals]
-      corr = sum(scene_corr) / max(len(scene_corr), 1)
-      skill = 1 - v_recon / floor  # 0 is no better than the mean image, 1 is perfect
-      v_answerable = answerable / n / max(seen_px / n, 1e-6)  # per answerable pixel
-      print(
-        f"epoch {epoch + 1}: val loss {v_loss:.4g} (recon {v_recon:.4g}, kl {v_kl:.4g}), "
-        f"scene corr {corr:.3f}, skill {skill:+.3f}, lift agree "
-        f"{sum(agree) / len(agree):.3f}, answerable {v_answerable:.1f}, "
-        f"invented {sum(invent) / len(invent):.3f}",
-        flush=True,
-      )
-      metrics = {
-        "val/loss": v_loss,
-        "val/recon": v_recon,
-        "val/kl": v_kl,
-        "val/scene_corr": corr,
-        "val/skill": skill,
-        "val/recon_answerable": v_answerable,
-        "val/lift_agreement": sum(agree) / len(agree),
-        "val/invented_density": sum(invent) / len(invent),
-        "train/recon_epoch": train_recon / max(train_batches, 1),
-        "train/lr": optimizer.param_groups[0]["lr"],
-        "epoch": epoch + 1,
-      }
-      if mae:
-        metrics["val/depth_mae_m"] = sum(mae) / len(mae)
-      if unknown_err:
-        metrics["val/unknown_mae"] = sum(unknown_err) / len(unknown_err)
-      run.log(metrics, step=global_step)
-      if isinstance(sched, METRIC_DRIVEN):
-        sched.step(v_recon)  # these step on the metric
-      torch.save(
-        {
-          "model": model.state_dict(),
-          "optimizer": optimizer.state_dict(),
-          "scheduler": sched.state_dict() if sched else None,
-          "epoch": epoch + 1,
-          "global_step": global_step,
-          "config": config,
-        },
-        CHECKPOINTS / f"{run.name}.pt",
-      )
-
-      if epoch % n_epochs == 0:
-        sample, index = roving()
-        shown = [(f"scene{s}", x, "") for s, x in enumerate(samples)]
-        shown.append(("roving", sample, f"training window {index}"))
-        for name, sample, note in shown:
-          log_novel_view(
-            model,
-            sample,
-            step=global_step,
-            mode=target,
-            key=f"media/novel/{name}",
-            note=note,
-          )
-          log_pose_sweep(
-            model,
-            sample,
-            step=global_step,
-            mode=target,
-            key=f"media/sweep/{name}",
-            note=note,
-          )
-  finally:
-    run.finish()
-
-  return model
-
-
-def main():
-  # underscores, not hyphens: these have to match sweep.json's parameter names exactly
-  parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--base_channels", type=int, default=32)
-  parser.add_argument("--groups", type=int, default=4)
-  parser.add_argument("--epochs", type=int, default=60)
-  parser.add_argument("--lr", type=float, default=1e-3)
-  parser.add_argument("--beta", type=float, default=0.01)
-  parser.add_argument(
-    "--unknown", type=int, default=0
-  )  # observedness channel + KL weighted by it
-  parser.add_argument("--scheduler", default="none", choices=SCHEDULERS)
-  parser.add_argument(
-    "--target", default="depth", choices=("rgb", "gray_depth", "depth")
-  )
-  parser.add_argument("--batch_size", type=int, default=4)
-  parser.add_argument("--image_size", type=int, default=64)
-  parser.add_argument("--stride", type=int, default=1)  # 1 overlaps windows, 5 does not
-  parser.add_argument("--envs")  # comma separated; all of TARTAN_ROOT if unset
-  parser.add_argument("--envs_per_epoch", type=int, default=0)  # 0 uses them all
-  parser.add_argument("--samples_per_epoch", type=int, default=0)  # 0 scales with envs_per_epoch
-  parser.add_argument("--val_env")  # which environment to hold out
-  parser.add_argument("--num_frames", type=int, default=7)
-  parser.add_argument(
-    "--jitter", type=int, default=1
-  )  # see JITTER_FOVY, and implies masking
-  parser.add_argument("--num_workers", type=int, default=6)
-  parser.add_argument("--seed", type=int, default=42)
-  parser.add_argument("--config")  # a json of any of these options
-  parser.add_argument("--resume")  # a checkpoint to carry on from
-  parser.add_argument(
-    "--taper", type=int, default=0
-  )  # anneal out instead of holding rate back
-  # a run's parameters belong in a file, so it can be repeated and diffed. Anything given on
-  # the command line still wins, which is what makes a config a starting point rather than a cage
-  known, _ = parser.parse_known_args()
-  if known.config:
-    overrides = json.loads(Path(known.config).read_text())
-    unknown = set(overrides) - {a.dest for a in parser._actions}  # noqa: SLF001
-    if unknown:
-      raise SystemExit(f"{known.config} sets unknown options: {sorted(unknown)}")
-    parser.set_defaults(**overrides)
-  args = parser.parse_args()
-
-  torch.manual_seed(args.seed)
-  np.random.seed(args.seed)
-
-  hw = (args.image_size, args.image_size)
-  data = TartanGroundConfig(
-    root=TARTAN,
-    envs=tuple(args.envs.split(",")) if args.envs else None,
-    val_env=args.val_env,
-    num_frames=args.num_frames,
-    stride=args.stride,
-    image_hw=(args.image_size, args.image_size),
-    head_fovy_deg=JITTER_FOVY if args.jitter else None,
-    include_head_jitter=bool(args.jitter),
-    batch_size=args.batch_size,
-    num_workers=args.num_workers,
-    envs_per_epoch=args.envs_per_epoch or None,
-    samples_per_epoch=args.samples_per_epoch or None,
-  )
-  train_loader, test_loader, summary = data.loaders()
-  loaders = (train_loader, test_loader)
-  print(summary, flush=True)
-
-  channels, groups = args.base_channels, args.groups
-  model = VVAEGeometric(
-    VVAEGeometricConfig(
-      render_hw=hw,
-      n_downsamples=2,
-      downsample_scale=2,
-      kernel_size=3,
-      base_channels=channels,
-      groups=groups,
-      target=args.target,
-      predict_unknown=bool(args.unknown),
-      source_fovy_deg=data.camera[1],
-    )
-  )
-  train_geometric(
-    model,
-    *loaders,
-    scheduler=args.scheduler,
-    target=args.target,
-    kl_mode="observed" if args.unknown else "uniform",
-    mask_unknown=bool(args.jitter),
-    resume=args.resume,
-    taper=bool(args.taper),
-    name=f"geo-c{channels}g{groups}-{args.target}-{args.scheduler}"
-    f"-b{args.beta:.2g}-lr{args.lr:.2g}"
-    f"{'-jit' if args.jitter else ''}"
-    f"{'-unk' if args.unknown else ''}",
-    epochs=args.epochs,
-    lr=args.lr,
-    beta=args.beta,
-  )
-
-
-if __name__ == "__main__":
-  main()
+            if epoch % n_epochs == 0:
+                sample, index = roving()
+                shown = [(f"scene{s}", x, "") for s, x in enumerate(samples)]
+                shown.append(("roving", sample, f"training window {index}"))
+                for name, sample, note in shown:
+                    log_context_strip(model, sample, step=global_step, mode=target,
+                                      key=f"media/context/{name}", note=note)
+                    log_novel_view(model, sample, step=global_step, mode=target,
+                                   key=f"media/novel/{name}", note=note)
+                    log_pose_sweep(model, sample, step=global_step, mode=target,
+                                   key=f"media/sweep/{name}", note=note)
+                    log_latent(model, sample, step=global_step, mode=target,
+                               key=f"media/latent/{name}", note=note)
+                save_latent(model, samples[0], CHECKPOINTS / f'{tag}-latent.npz', mode=target)
+    return model

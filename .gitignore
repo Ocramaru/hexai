@@ -13,6 +13,17 @@ wheels/
 **/.runs/
 **/__pycache__/
 wandb/
+logs/
+log/
 data
 .ignore/
 .ruff_cache/
+
+# Secrets: WANDB_API_KEY and the project wandb logs to. Never committed
+.env
+.env.*
+!.env.example
+
+# ignore quackspace files
+.index.yaml
+_diagrams.md

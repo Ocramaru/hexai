@@ -24,7 +24,9 @@ from mjlab.utils.spec_config import CollisionCfg
 # MJCF.
 ##
 
-HEXAPOD_XML: Path = Path(__file__).parent / "xmls" / "hexapod.xml"
+HEXAPOD_XML: Path = (
+  Path(__file__).parent / "xmls" / "hexapod.xml"
+)
 assert HEXAPOD_XML.exists()
 
 

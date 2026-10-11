@@ -12,6 +12,8 @@ dependencies = [
     "scipy>=1.14",
     "wandb>=0.18",
     "matplotlib>=3.9",
+    "python-dotenv>=1.0",  # hexai/__init__.py loads the repo's .env, so every entry point has it
+    "tyro>=1.0",  # a run's config is a dataclass, and this makes it the command line too
 ]
 
 [build-system]
@@ -19,7 +21,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["plotly>=6", "pytest>=8", "ruff>=0.6", "ty>=0.0.1a1"]
+# plotly renders a figure through nbformat, so figures/voxels.ipynb raises on its first one without
+dev = ["jupyter>=1.1.1", "nbformat>=5.10", "plotly>=6", "pytest>=8", "ruff>=0.6", "ty>=0.0.1a1"]
 
 [tool.ruff]
 src = ["src"]
@@ -27,8 +30,17 @@ indent-width = 2
 exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "B"]
+# no "I": isort's I001 only ever wants import blocks rewritten into its own wrapping
+select = ["E4", "E7", "E9", "F", "B"]
 ignore = ["B011", "E701"]
+
+[tool.ruff.format]
+# Disabled on purpose. The layout here is hand-maintained -- compact calls, one-line ifs (which is
+# why E701 is ignored above), no line-length rule -- and the formatter overrides all of it. Running
+# it once rewrote six untouched files and buried three real changes under ~1400 cosmetic lines.
+# Excluding everything makes `ruff format` a no-op for editors and CI too, not only for whoever
+# remembers not to type it. `ruff check --fix` is unaffected and is the linter to use.
+exclude = ["**/*"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hexai"]

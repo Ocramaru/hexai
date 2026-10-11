@@ -31,14 +31,17 @@ Truth on top, render below, as the query camera pans. A latent holding a scene c
 ## Running it
 
 ```bash
-# a run's parameters live in run.json; anything on the command line overrides it
-uv run python -m hexai.models.vvae.train --config src/hexai/models/vvae/run.json
+# a run starts from a preset in config.py; anything on the command line overrides it, and --help
+# lists the presets and every option with its reason
+uv run python -m hexai.models.vvae.run baseline
 
-# checkpoints land in .runs/, named after whatever differs from the defaults
+# checkpoints land in .runs/ under the run's wandb name, with that run's config beside them as
+# <name>.json. --name sets one by hand
 
-# continue a run without restarting its schedule, then anneal it out
-uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20
-uv run python -m hexai.models.vvae.train --resume .runs/<name>.pt --epochs 20 --taper 1
+# continue a run without restarting its schedule, then anneal it out. Name the same preset, or the
+# model is built at a different shape and will not fit the checkpoint
+uv run python -m hexai.models.vvae.run baseline --resume .runs/<name>.pt --epochs 20
+uv run python -m hexai.models.vvae.run baseline --resume .runs/<name>.pt --epochs 20 --taper True
 ```
 
 `--jitter` aims the head each frame, which is what the pan/tilt servos do on the robot, and masks the loss over pixels no input frame saw.

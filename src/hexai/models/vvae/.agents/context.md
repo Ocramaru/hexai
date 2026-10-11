@@ -1,6 +1,19 @@
 # VVAE — 3D latent plan
 
-Why the architecture is what it is. What the experiments actually showed is in [learned.md](learned.md), open tasks in [todo.md](todo.md).
+<!-- map: generated. Edit the note, not this; after a manual edit run `agent remap` -->
+
+| section | line |
+|---|---|
+| Constraints | 20 |
+| Data | 37 |
+| Structure | 49 |
+| Build order | 87 |
+| Open questions | 100 |
+
+<!-- /map -->
+
+
+Why the architecture is what it is. What the experiments actually showed is in [[learned]], open tasks in [[todo]].
 
 The latent is a viewpoint-independent belief about the space around the robot, not a compressed view. Only the encoder ships to the Pi; the decoder is training scaffolding.
 
@@ -37,17 +50,23 @@ On the robot the same 0.21 m baseline takes ~2 s, so frames must be spaced by di
 
 Encoder, per frame independently. What is built today:
 
-    unproject by depth + pose -> splat into the canonical grid    exact geometry, not learned
-    sum over frames                                               order-invariant
-    enc3d -> latent
+```text
+unproject by depth + pose -> splat into the canonical grid    exact geometry, not learned
+sum over frames                                               order-invariant
+enc3d -> latent
+```
 
 Step 5 replaces that first line with a learned lift, keeping the rest:
 
-    enc2d(rgb, depth) -> C*D channels -> reshape [C, D, H, W]     learned, 2D convs only
+```text
+enc2d(rgb, depth) -> C*D channels -> reshape [C, D, H, W]     learned, 2D convs only
+```
 
 Decoder, query-pose conditioned, rendering a **held-out** view:
 
-    V_hat = dec3d(z);  image = render(V_hat, query_pose)
+```text
+V_hat = dec3d(z);  image = render(V_hat, query_pose)
+```
 
 The render target is depth, not rgb — pure geometry needs no appearance channel, so the volume is density alone and the latent stops paying to remember colour.
 
