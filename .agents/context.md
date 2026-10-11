@@ -1,11 +1,18 @@
 # hexai
 
-Perception and learning for the Freenove Big Hexapod: a small twelve-servo walker with one camera
-on a pan/tilt head and a Raspberry Pi 4B for a brain.
+<!-- map: generated. Edit the note, not this; after a manual edit run `agent remap` -->
 
-Simulation, robot assets and math helpers come from [mjlab](../mjlab), installed editable.
-Everything here is the robot's own stack, and none of it needs to live inside a fork of someone
-else's repo.
+| section | line |
+|---|---|
+| What constrains everything | 17 |
+| Layout | 26 |
+
+<!-- /map -->
+
+
+Perception and learning for the Freenove Big Hexapod: a small twelve-servo walker with one camera on a pan/tilt head and a Raspberry Pi 4B for a brain.
+
+Simulation, robot assets and math helpers come from [mjlab](../mjlab) as a published release, not an editable install of the fork — so anything hexai imports has to exist in the version pyproject pins, and what only exists in the fork has to come across rather than be imported. Everything here is the robot's own stack, and none of it needs to live inside a fork of someone else's repo.
 
 ## What constrains everything
 
@@ -18,11 +25,10 @@ else's repo.
 
 ## Layout
 
-`hexai/utilities` depends on nothing, `hexai/data` on utilities, `hexai/models` on both. Strictly
-one direction — nothing leans back up.
+`hexai/utilities` depends on nothing, `hexai/data` on utilities, `hexai/models` on both. Strictly one direction — nothing leans back up.
 
-Where a new file goes: `utilities` if a second model would plausibly want it, `models` if it is
-specific to one. Geometry, camera intrinsics and schedulers all moved out of the VVAE on that
-test.
+Where a new file goes: `utilities` if a second model would plausibly want it, `models` if it is specific to one. That test is why geometry, camera intrinsics and schedulers sit in `utilities`.
 
-Open work, including what is still to migrate out of the fork, is in [todo.md](todo.md).
+Importing `hexai` loads the repo's `.env`, and so does every script in `scripts/`; `.env.example` lists what it holds.
+
+Open work, including what is still to migrate out of the fork, is in [[todo]].

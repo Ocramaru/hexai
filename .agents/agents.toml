@@ -1,0 +1,6 @@
+# The machine-wide ml.runs standard globs `train_*.py` and `run.json`, which miss this layout.
+[applies]
+"ml.runs" = ["train.py", "run.py", "eval.py", "config.py"]
+
+[review]
+limit = 5
